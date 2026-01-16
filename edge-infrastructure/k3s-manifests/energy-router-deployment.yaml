@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: energy-router
+  namespace: microgrid-control
+  labels:
+    app: energy-router
+    tier: physics-engine
+    version: "1.0.0"
+spec:
+  replicas: 1 # Singleton pattern at the edge (no horizontal scaling on a single device)
+  selector:
+    matchLabels:
+      app: energy-router
+  strategy:
+    type: Recreate # Kill old pod before starting new one to avoid port conflicts on edge
+  template:
+    metadata:
+      labels:
+        app: energy-router
+    spec:
+      securityContext:
+        runAsUser: 1000 # Matches 'energyuser' in Dockerfile
+        runAsGroup: 1000
+        fsGroup: 2000
+      containers:
+        - name: pinn-engine
+          image: decode-energy-router:latest # Local image on the edge device
+          imagePullPolicy: IfNotPresent # Don't pull from cloud if local exists (Resilience)
+          
+          # --- Environment Configuration ---
+          env:
+            - name: ENV
+              value: "production"
+            - name: MODEL_PATH
+              value: "/app/assets/models/pinn_traced.pt"
+            # In a real K8s setup, these would come from Secrets/ConfigMaps
+            - name: DATABASE_URL
+              value: "postgresql://user:password@db-service:5432/microgrid"
+            - name: REDIS_URL
+              value: "redis://redis-service:6379/0"
+          
+          # --- Resource Constraints (Critical for Edge) ---
+          resources:
+            requests:
+              memory: "512Mi" # Guarantee enough RAM for PyTorch
+              cpu: "500m"     # 0.5 CPU Core
+            limits:
+              memory: "1Gi"   # Kill container if leak exceeds 1GB (Protect Host)
+              cpu: "1000m"    # Max 1 Core
+          
+          # --- Ports ---
+          ports:
+            - containerPort: 8000
+              name: http-api
+              protocol: TCP
+          
+          # --- Reliability Probes (The "Heartbeat") ---
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30 # Give PyTorch time to load
+            periodSeconds: 10       # Check every 10s
+            timeoutSeconds: 2       # Fail fast if unresponsive
+            failureThreshold: 3     # Restart after 3 failures
+          
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          
+          # --- Volume Mounts ---
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+      
+      # --- Volumes ---
+      volumes:
+        - name: config-volume
+          configMap:
+            name: edge-settings-map # Injected site-specific configs
+            
