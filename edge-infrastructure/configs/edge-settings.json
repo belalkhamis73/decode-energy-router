@@ -1,0 +1,57 @@
+{
+  "site_metadata": {
+    "site_id": "MG_EGY_SUZ_001",
+    "location_name": "Suez Canal Industrial Zone A",
+    "commission_date": "2026-01-15",
+    "grid_connection_type": "grid_connected_with_island_capability"
+  },
+  "physics_constraints": {
+    "voltage_limits": {
+      "nominal_kv": 33.0,
+      "min_pu": 0.95,
+      "max_pu": 1.05,
+      "trip_delay_ms": 150
+    },
+    "frequency_limits": {
+      "nominal_hz": 50.0,
+      "deadband_hz": 0.05,
+      "rocof_max_hz_s": 1.0
+    },
+    "thermal_limits": {
+      "transformer_max_load_kva": 2500,
+      "cable_ampacity_a": 400
+    }
+  },
+  "asset_topology": {
+    "inverters": [
+      {
+        "id": "inv_pv_01",
+        "capacity_kw": 500,
+        "control_mode": "voltage_support",
+        "response_time_ms": 20
+      },
+      {
+        "id": "inv_bess_01",
+        "capacity_kw": 1000,
+        "capacity_kwh": 4000,
+        "control_mode": "frequency_response"
+      }
+    ],
+    "loads": {
+      "critical_load_kw": 350,
+      "sheddable_load_kw": 800
+    }
+  },
+  "telemetry_config": {
+    "scada_endpoint": "opc.tcp://192.168.1.10:4840",
+    "polling_rate_ms": 100,
+    "upload_batch_size": 50,
+    "edge_retention_days": 7
+  },
+  "model_parameters": {
+    "active_model_version": "v1.2.0-stable",
+    "inference_device": "cuda:0",
+    "confidence_threshold": 0.92,
+    "fallback_strategy": "last_known_good_state"
+  }
+}
