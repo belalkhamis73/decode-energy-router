@@ -1,0 +1,101 @@
+name: Physics Integrity Gate
+
+# 1. Triggers: Run on every commit to core branches
+on:
+  push:
+    branches: [ "main", "develop" ]
+    paths:
+      - 'physics-core/**'  # Only run if physics engine changes
+      - 'backend/**'
+      - 'ml-models/**'
+  pull_request:
+    branches: [ "main" ]
+
+# 2. Concurrency: Cancel outdated runs to save compute (Green Ops)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-laws-of-nature:
+    name: 🔬 Physics Compliance Check
+    runs-on: ubuntu-latest
+    
+    # Strategy: Fail Fast. If one law is broken, stop immediately.
+    strategy:
+      fail-fast: true
+
+    steps:
+      # --- Setup Phase ---
+      - name: 📥 Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip' # Cache deps for speed
+
+      - name: 📦 Install Industrial Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install requirements from the backend (contains PyTorch, Pandapower)
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+          # Install Testing Frameworks
+          pip install pytest pytest-asyncio pytest-cov httpx ruff
+
+      # --- Code Quality Phase (Static Analysis) ---
+      - name: 🔍 Linting (Code Hygiene)
+        run: |
+          # "Clean Code" Principle: Enforce PEP8 and strict typing
+          ruff check . --select E,F,I --ignore E501
+
+      # --- Build Phase (Bootstrap) ---
+      - name: 🏗️ Bootstrap Synthetic Model (Artifact Generation)
+        run: |
+          # We need a model artifact to test the integration endpoints.
+          # Runs the training script to generate 'pinn_traced.pt'
+          echo "Bootstrapping PINN for Testing..."
+          export PYTHONPATH=$PYTHONPATH:.
+          cd ml-models
+          python train_and_save.py
+          cd ..
+          
+          # Verify artifact existence
+          if [ ! -f backend/assets/models/pinn_traced.pt ]; then
+            echo "❌ Critical Error: Model artifact generation failed."
+            exit 1
+          fi
+
+      # --- Testing Phase (The "Physics Gate") ---
+      - name: 🧪 Unit Tests: Immutable Laws of Physics
+        run: |
+          # Principle: Test-Driven Development (TDD)
+          # Verifies that Swing Equation & Power Flow classes return 0.0 residual for known balanced states.
+          export PYTHONPATH=$PYTHONPATH:.
+          echo "Verifying Physics Core Equations..."
+          pytest tests/unit/test_physics_laws.py -v --disable-warnings
+
+      - name: 🤖 Integration Tests: Digital Twin Resilience
+        env:
+          # Inject Test Configuration (12-Factor App)
+          DATABASE_URL: "sqlite:///./test.db" # Use SQLite for fast CI testing
+          REDIS_URL: "redis://localhost:6379/0" # Mocked or Service Container needed in real prod
+          MODEL_PATH: "backend/assets/models/pinn_traced.pt"
+          PHYSICS_RESIDUAL_THRESHOLD: "1e-4"
+        run: |
+          # Spins up the FastAPI routes and tests the /simulate endpoint.
+          # Asserts that specific "Black Swan" inputs do not crash the system.
+          export PYTHONPATH=$PYTHONPATH:.
+          echo "Running Integration Tests..."
+          pytest tests/integration/test_virtual_grid.py -v
+
+      # --- Reporting Phase ---
+      - name: 📊 Publish Integrity Report
+        if: always() # Run even if tests fail so we can see WHY
+        uses: actions/upload-artifact@v4
+        with:
+          name: physics-compliance-report
+          path: .pytest_cache
+          retention-days: 5
+          
