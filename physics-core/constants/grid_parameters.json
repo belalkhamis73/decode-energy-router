@@ -1,0 +1,76 @@
+{
+  "_comment": "Centralized Physics Constants for DECODE Energy Router. Adheres to IEEE Standards.",
+  "metadata": {
+    "version": "1.2.0",
+    "description": "Physical constants for Hybrid Microgrid (IEEE 14-Bus derivative)",
+    "units": "per-unit (p.u.) unless specified",
+    "maintainer": "physics-core-team"
+  },
+  "global_base": {
+    "S_base_mva": 100.0,
+    "V_base_kv": 33.0,
+    "F_nom_hz": 60.0,
+    "omega_s_rad_s": 376.9911
+  },
+  "operational_limits": {
+    "voltage": {
+      "min_pu": 0.95,
+      "max_pu": 1.05,
+      "critical_low_pu": 0.90
+    },
+    "frequency": {
+      "deadband_hz": 0.036,
+      "rocof_max_hz_s": 0.5
+    },
+    "thermal": {
+      "line_loading_max_pct": 100.0,
+      "bess_temp_max_c": 45.0,
+      "inverter_temp_max_c": 85.0
+    }
+  },
+  "dynamic_parameters": {
+    "synchronous_generators": {
+      "default": {
+        "H_inertia_s": 3.5,
+        "D_damping_pu": 1.0,
+        "Xd_transient_pu": 0.3
+      },
+      "gen_bus_1": {
+        "H_inertia_s": 5.14,
+        "D_damping_pu": 2.0
+      },
+      "gen_bus_2": {
+        "H_inertia_s": 6.54,
+        "D_damping_pu": 2.0
+      }
+    },
+    "inverter_resources": {
+      "solar_pv": {
+        "virtual_inertia_s": 0.5,
+        "pll_gain_kp": 0.1,
+        "pll_gain_ki": 10.0
+      }
+    },
+    "bess_thermodynamics": {
+      "cell_18650": {
+        "mass_kg": 0.045,
+        "specific_heat_cp_J_kgK": 950.0,
+        "internal_resistance_ohm": 0.025,
+        "heat_transfer_coeff_h_W_m2K": 20.0,
+        "surface_area_m2": 0.0035
+      },
+      "pack_module": {
+        "mass_kg": 50.0,
+        "specific_heat_cp_J_kgK": 900.0,
+        "internal_resistance_ohm": 0.15,
+        "heat_transfer_coeff_h_W_m2K": 15.0,
+        "surface_area_m2": 1.2
+      }
+    }
+  },
+  "optimization_weights": {
+    "w_data_loss": 1.0,
+    "w_physics_loss": 0.5,
+    "w_boundary_condition": 10.0
+  }
+}
