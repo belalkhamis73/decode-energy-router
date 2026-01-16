@@ -1,0 +1,51 @@
+# --- Core Web Framework (The "Nervous System") ---
+# FastAPI: High-performance, async-first API framework
+fastapi==0.109.2
+# Uvicorn: ASGI server to run FastAPI
+uvicorn[standard]==0.27.1
+# Pydantic: Data validation and settings management (Strict Typing)
+pydantic==2.6.1
+pydantic-settings==2.1.0
+# Python-Multipart: Required for file uploads (if needed later)
+python-multipart==0.0.9
+
+# --- Physics & AI Engine (The "Brain") ---
+# PyTorch: The deep learning framework (CPU version for standard containers)
+# Note: For Jetson Edge, you often install torch from a pre-built wheel, 
+# but this covers standard dev/cloud environments.
+torch==2.2.0
+# NumPy: Fundamental matrix operations
+numpy==1.26.4
+# Pandas: Data manipulation for time-series
+pandas==2.2.0
+# SciPy: Scientific computing (interpolation, optimization)
+scipy==1.12.0
+
+# --- Database & Storage (The "Memory") ---
+# SQLAlchemy: ORM for interacting with PostgreSQL
+SQLAlchemy==2.0.27
+# AsyncPG: High-speed async PostgreSQL driver
+asyncpg==0.29.0
+# Redis: Client for the "Shared Brain" / Cache
+redis==5.0.1
+
+# --- Scientific Domain (The "Physics") ---
+# Pandapower: The core power flow solver (Low-Fidelity Physics)
+pandapower==2.14.0
+# NetworkX: Graph theory for grid topology analysis
+networkx==3.2.1
+
+# --- Utilities & Observability (The "Immune System") ---
+# Requests: Synchronous HTTP client (for calling external APIs)
+requests==2.31.0
+# HTTPX: Asynchronous HTTP client (preferred for async API calls)
+httpx==0.26.0
+# Python-Dotenv: Loading .env files locally
+python-dotenv==1.0.1
+# Loguru: Better logging (optional, but recommended for clean logs)
+loguru==0.7.2
+
+# --- Testing (Dev Dependencies - usually in requirements-dev.txt, but kept here for MVP) ---
+# Pytest: The testing framework
+pytest==8.0.1
+# Httpx again required for TestClient
