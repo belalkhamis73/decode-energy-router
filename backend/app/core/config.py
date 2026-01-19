@@ -1,4 +1,4 @@
-# @title 🛠️ Fix Configuration (Overwrite config.py)
+# @title 🛠️ Fix 2: Update Configuration (config.py)
 import os
 
 config_content = """
@@ -13,14 +13,14 @@ import json
 import os
 
 class Settings(BaseSettings):
-    # --- 1. General Info (FIXED: Added PROJECT_NAME) ---
+    # --- 1. General Info ---
     PROJECT_NAME: str = "DECODE Energy Router"
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
-    # --- 2. Security & Auth ---
+    # --- 2. Security & Auth (FIXED: Added Defaults) ---
     SECRET_KEY: str = "dev_insecure_secret_key"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
@@ -34,7 +34,7 @@ class Settings(BaseSettings):
             return v
         raise ValueError(v)
 
-    # --- 3. Infrastructure ---
+    # --- 3. Infrastructure (FIXED: Added Defaults) ---
     DATABASE_URL: str = "sqlite:///./dev.db" 
     REDIS_URL: str = "redis://localhost:6379"
 
@@ -88,4 +88,4 @@ settings = Settings()
 os.makedirs("backend/app/core", exist_ok=True)
 with open("backend/app/core/config.py", "w") as f:
     f.write(config_content)
-print("✅ Fixed config.py (Restored PROJECT_NAME)")
+print("✅ Fixed config.py")
