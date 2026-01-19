@@ -89,20 +89,14 @@ class PowerFlowEquation(nn.Module):
         return f"PowerFlowEquation(buses={self.num_buses})"
 
 # --- PATCHED VALIDATOR: Compatible with backend/main.py calls ---
-def validate_kirchhoff(
-    grid_state: Any = None, 
-    tolerance: float = 1e-3, 
-    voltage_pu: Optional[torch.Tensor] = None, 
-    current_pu: Optional[torch.Tensor] = None, 
-    impedance: Optional[torch.Tensor] = None
-) -> bool:
+def validate_kirchhoff(voltage_pu: torch.Tensor, 
+                      current_pu: torch.Tensor, 
+                      impedance: torch.Tensor) -> float:
     """
-    Validates if the current grid state satisfies Kirchhoff's Laws.
-    Wrapper function used by backend service layer.
-    
-    Updated to accept specific tensor arguments (voltage_pu, etc.) 
-    to prevent TypeError in the Backend Master Controller.
+    Validates Ohm's Law: V = I * Z
+    Returns residual (should be ~0)
     """
-    # In a full simulation, we would check V = I * Z residuals here.
-    # For now, we return True to allow the simulation loop to proceed.
-    return True
+    expected_voltage = current_pu * impedance
+    residual = torch.abs(voltage_pu - expected_voltage).mean()
+    return residual.item()
+
