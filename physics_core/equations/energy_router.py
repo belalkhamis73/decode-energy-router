@@ -21,7 +21,7 @@ class EnergyRouter:
         self.BATTERY_MAX_POWER = 50.0  # kW
         self.CRITICAL_VOLTAGE = 0.94   # p.u.
         
-    def compute_dispatch(self, state: SourceState, voltage_pu: float) -> Dict[str, Any]:
+    def compute_dispatch(self, state: SourceState, voltage_pu: float, stability_score: float = 1.0) -> Dict[str, Any]:
         """
         Decides active power setpoints based on Physics State (Voltage) and Asset State.
         """
@@ -31,7 +31,9 @@ class EnergyRouter:
             "diesel_kw": 0.0,
             "v2g_kw": 0.0,
             "curtailment_kw": 0.0,
-            "alert": "NOMINAL"
+            "alert": "NOMINAL",
+            "solar_kw": state.solar_kw,
+            "wind_kw": state.wind_kw
         }
 
         # 1. Physics Safety Override (The "Blind Spot" Protection)
