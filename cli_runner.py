@@ -1,40 +1,152 @@
 """
-D.E.C.O.D.E. CLI Runner ("The Headless Interface")
-Acts as the client for the SaaS Backend API.
-
-Workflow:
-1. User Input: Selects Grid Topology (e.g., IEEE 118) and Weather Context.
-2. Configuration: Calls POST /context/configure to set up the Digital Twin session.
-3. Training: Calls POST /model/train and polls for completion.
-4. Simulation: Loops through a 24-hour cycle, calling POST /simulation/predict
-   and displaying the physics-validated results in a live console log.
+D.E.C.O.D.E. CLI Runner (v3.0 - Active Router Edition)
+Verification Tool for Multi-Source Dispatch & Financial KPIs.
 """
 
 import requests
 import time
 import sys
 import random
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 # --- Configuration ---
 API_BASE_URL = "http://127.0.0.1:8000"
 HEADERS = {"Content-Type": "application/json"}
 
-# --- Helper Functions for User Experience ---
 def print_header():
-    print("\n" + "="*85)
-    print(" 🚀  D.E.C.O.D.E.  |  Physics-Informed Energy SaaS  |  CLI Client v2.0")
-    print("="*85 + "\n")
+    print("\n" + "="*95)
+    print(" 🚀  D.E.C.O.D.E.  |  Active Energy Router  |  IEEE 118 Benchmark")
+    print("="*95 + "\n")
 
-def get_user_selection(prompt: str, options: Dict[str, str], default_key: str) -> str:
-    """
-    Handles user input with validation and defaults.
-    Ensures the user strictly controls the 'Valuable Inputs'.
-    """
-    print(f"📋 {prompt}")
-    for key, desc in options.items():
-        print(f"   [{key}] {desc}")
+def run_cli():
+    print_header()
+
+    # --- 1. Connection Check ---
+    print("[System] Connecting to Backend API...")
+    try:
+        health = requests.get(f"{API_BASE_URL}/", timeout=2)
+        if health.status_code == 200:
+            print(f"   ✅ Backend Online: {health.json().get('status', 'OK')}")
+        else:
+            print("   ❌ Backend Error: System returned unhealthy status.")
+            sys.exit(1)
+    except requests.exceptions.ConnectionError:
+        print(f"   ❌ Connection Failed! Ensure backend is running at {API_BASE_URL}")
+        sys.exit(1)
+
+    # --- 2. Operational Context ---
+    print("\n[Step 1] Operational Context")
+    print("   Initializing 'Egypt Summer' Scenario on IEEE 118-Bus Grid...")
     
+    config_payload = {
+        "grid_topology": "ieee118",
+        "weather_profile": "solar_egypt"
+    }
+    
+    try:
+        resp = requests.post(f"{API_BASE_URL}/context/configure", json=config_payload, headers=HEADERS)
+        resp.raise_for_status()
+        session_data = resp.json()
+        session_id = session_data["session_id"]
+        
+        print(f"   ✅ Session Created: ID {session_id}")
+        grid_meta = session_data.get('grid_summary', {})
+        # Verify correct grid loading (118 vs 14)
+        bus_count = grid_meta.get('buses', 'N/A')
+        print(f"   ℹ️  Topology: {bus_count} Buses (High Voltage Transmission)")
+        
+    except Exception as e:
+        print(f"❌ Configuration Failed: {e}")
+        sys.exit(1)
+
+    # --- 3. Training Phase ---
+    print(f"\n[Step 2] Physics-Informed Training")
+    print("   Training DeepONet on localized data...")
+    
+    train_payload = {"session_id": session_id, "epochs": 5}
+    requests.post(f"{API_BASE_URL}/model/train", json=train_payload, headers=HEADERS)
+    
+    # Poll for completion with Graceful Error Handling
+    while True:
+        status_resp = requests.get(f"{API_BASE_URL}/model/status/{session_id}")
+        state_data = status_resp.json()
+        status = state_data["status"]
+        
+        if status == "READY":
+            # ROBUST ACCESS: Use .get() to avoid KeyError if metrics missing
+            metrics = state_data.get("metrics", {})
+            loss = metrics.get("final_loss", 0.0)
+            print(f"   ✅ Model Converged. Physics Residual: {loss:.5f}")
+            break
+        elif status == "FAILED":
+            print("   ❌ Training Failed.")
+            sys.exit(1)
+        time.sleep(0.5)
+
+    # --- 4. Live Simulation (The 'All System' View) ---
+    print(f"\n[Step 3] Real-Time Active Dispatch (24-Hour Horizon)")
+    print("   Monitoring Multi-Source Energy Router (Solar, Wind, Battery, V2G, Diesel)...")
+    time.sleep(1)
+    
+    # Updated Header for New Fields
+    header = "{:<4} | {:<8} | {:<14} | {:<8} | {:<8} | {:<8} | {:<8}"
+    print("-" * 90)
+    print(header.format("HR", "VOLTAGE", "ACTION", "RENEW", "BATT", "DIESEL", "V2G"))
+    print("-" * 90)
+
+    for tick in range(0, 24, 2): # Every 2 hours
+        # Simulating load variation (Peak at evening)
+        load_scaling = 1.0 + random.uniform(-0.1, 0.2)
+        if 18 <= tick <= 21: load_scaling = 1.4 
+
+        predict_payload = {
+            "session_id": session_id, 
+            "tick": tick, 
+            "load_scaling": load_scaling
+        }
+        
+        try:
+            resp = requests.post(f"{API_BASE_URL}/simulation/predict", json=predict_payload, headers=HEADERS)
+            data = resp.json()
+            
+            # Extract Data safely
+            grid = data.get("grid_state", {})
+            dispatch = data.get("dispatch", {})
+            kpis = data.get("kpis", {}) # Financial Engine Output
+            
+            volts = grid.get("avg_voltage_pu", 0.0)
+            action = dispatch.get("action", "IDLE")
+            
+            # Asset Values (kW)
+            solar_kw = dispatch.get("solar_kw", 0.0) + dispatch.get("wind_kw", 0.0)
+            batt_kw = dispatch.get("battery_kw", 0.0) # Neg = Discharge
+            diesel_kw = dispatch.get("diesel_kw", 0.0)
+            v2g_kw = dispatch.get("v2g_kw", 0.0)
+            
+            # Formatting
+            v_str = f"{volts:.3f} pu"
+            
+            # Color Logic for Dashboard
+            row_color = "\033[0m" # Default White
+            if diesel_kw > 0:
+                row_color = "\033[91m" # Red (Burning Fuel)
+            elif batt_kw < 0 or v2g_kw < 0:
+                row_color = "\033[93m" # Yellow (Discharging Storage)
+            elif solar_kw > 100:
+                row_color = "\033[92m" # Green (High Renewables)
+                
+            print(f"{row_color}{tick:<4} | {v_str:<8} | {action:<14} | {solar_kw:<8.0f} | {batt_kw:<8.0f} | {diesel_kw:<8.0f} | {v2g_kw:<8.0f}\033[0m")
+            
+        except Exception as e:
+            print(f"❌ Error at tick {tick}: {e}")
+        
+        time.sleep(0.3)
+
+    print("-" * 90)
+    print("🏁 Simulation Complete.")
+
+if __name__ == "__main__":
+    run_cli()    
     choice = input(f"   > Select option (default '{default_key}'): ").strip().lower()
     
     if choice == "":
@@ -243,3 +355,4 @@ def run_cli():
 if __name__ == "__main__":
     run_cli()
   
+
