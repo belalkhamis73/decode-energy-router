@@ -5,12 +5,12 @@ Ensures only physically plausible scenarios are passed to the Digital Twin.
 """
 
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Literal
+from typing import List, Optional
 from datetime import datetime
 from enum import Enum  # <--- FIXED: Added Enum Import
 
 # --- Enums for Strict Typing ---
-# FIXED: Inherit from (str, Enum) so Pydantic recognizes them
+# FIXED: Inherit from (str, Enum) so Pydantic recognizes them as valid types
 class ComponentType(str, Enum):
     LINE = "line"
     BUS = "bus"
@@ -32,7 +32,7 @@ class FaultScenario(BaseModel):
     timestamp: datetime = Field(..., description="UTC timestamp for the simulation start.")
     target_component: str = Field(..., example="Line_1-2", description="ID of the grid asset to fail.")
     
-    # Use the Enum here instead of Literal for better type safety
+    # FIXED: Use the Enum class here instead of Literal for better validation
     component_type: ComponentType = Field(..., description="Category of the asset.")
     
     fault_type: FaultType = Field(..., description="The physics of the failure mode.")
