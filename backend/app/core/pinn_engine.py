@@ -63,3 +63,7 @@ class PINNEngine:
             prediction = self.model(tensor_in)
             return prediction.item()
                                         
+
+
+# FIXED: Singleton Instance
+pinn_engine = PINNEngine()

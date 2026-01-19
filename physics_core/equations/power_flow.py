@@ -100,3 +100,5 @@ def validate_kirchhoff(voltage_pu: torch.Tensor,
     residual = torch.abs(voltage_pu - expected_voltage).mean()
     return residual.item()
 
+
+def validate_kirchhoff(v, i, z): return (v - i*z).abs().mean().item()

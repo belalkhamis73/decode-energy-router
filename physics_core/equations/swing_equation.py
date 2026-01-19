@@ -95,3 +95,5 @@ def calculate_freq_deviation(power_mismatch: float, inertia_h: float) -> float:
     df/dt = (Pm - Pe) / (2H)
     """
     return power_mismatch / (2 * inertia_h)
+
+def calculate_freq_deviation(pm, h): return pm / (2*h) if h>0 else 0.0
