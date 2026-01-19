@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import torch
 import pvlib
+import io  # FIX: Added missing import
 from torch.utils.data import Dataset
 from typing import Tuple, List, Optional, Dict, Union
 from dataclasses import dataclass
@@ -106,10 +107,6 @@ class PhysicsScaler(BaseEstimator, TransformerMixin):
     """
     Domain-Specific Normalizer for Energy Systems.
     Scales inputs to ranges optimal for Neural Network convergence while preserving physical meaning.
-    
-    Alterations:
-    - Added scaling for Dictionary-based inputs (from DataManager).
-    - Implemented Per-Unit (p.u.) conversion for Voltage.
     """
     
     # Physical Limits for Min-Max Scaling
@@ -131,11 +128,6 @@ class PhysicsScaler(BaseEstimator, TransformerMixin):
     def normalize_context(self, weather_data: Dict[str, List[float]]) -> torch.Tensor:
         """
         Scales raw weather dictionary (from DataManager) to [0, 1] tensors for DeepONet.
-        
-        Mappings:
-        - GHI: 0 -> 1400 W/m2  => 0 -> 1
-        - Wind: 0 -> 30 m/s    => 0 -> 1
-        - Temp: -20 -> 60 C    => 0 -> 1
         """
         # Convert lists to numpy arrays
         ghi = np.array(weather_data.get('ghi', []), dtype=np.float32)
@@ -149,7 +141,6 @@ class PhysicsScaler(BaseEstimator, TransformerMixin):
         temp_norm = np.clip(temp_norm, 0.0, 1.0)
         
         # Stack into Tensor [Seq_Len, Features]
-        # Shape: [24, 3]
         normalized_tensor = torch.tensor(
             np.stack([ghi_norm, wind_norm, temp_norm], axis=1),
             dtype=torch.float32
@@ -159,12 +150,8 @@ class PhysicsScaler(BaseEstimator, TransformerMixin):
     def normalize_voltage(self, voltage: Union[float, np.ndarray, torch.Tensor], base_kv: float) -> Union[float, torch.Tensor]:
         """
         Scales absolute voltage (kV) to Per-Unit (p.u.).
-        If input is already near 1.0 (heuristic check), assumes it is already p.u.
-        
-        Formula: V_pu = V_actual / V_base
         """
         if isinstance(voltage, torch.Tensor):
-            # Heuristic: If max value is small (< 2.0), assume already p.u.
             if voltage.max() < 2.0:
                 return voltage
             return voltage / base_kv
@@ -185,23 +172,6 @@ class PhysicsScaler(BaseEstimator, TransformerMixin):
         if target_key == 'ghi':
             return val * self.MAX_GHI
         elif target_key == 'voltage_pu':
-            # Voltage output from DeepONet is typically trained in p.u. directly
             return val 
             
         return val
-
-# --- Usage Example (to be triggered by main orchestration script) ---
-if __name__ == "__main__":
-    # Test Normalization
-    scaler = PhysicsScaler()
-    
-    mock_weather = {
-        "ghi": [0.0, 700.0, 1400.0],
-        "wind_speed": [0.0, 15.0, 30.0],
-        "temperature": [-20.0, 20.0, 60.0]
-    }
-    
-    norm = scaler.normalize_context(mock_weather)
-    print("Normalized Context:\n", norm)
-    # Expecting:
-    # [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [1.0, 1.0, 1.0]]
