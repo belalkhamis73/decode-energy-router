@@ -1,91 +1,96 @@
-# @title 🛠️ Fix 2: Update Configuration (config.py)
-import os
-
-config_content = """
-\"\"\"
-Core Configuration Module (Patched for Dev).
-\"\"\"
+"""
+Core Configuration Module.
+Implements the 12-Factor App 'Config' principle.
+Loads and validates environment variables using Pydantic Settings.
+"""
 
 from typing import List, Union, Optional, Dict, Any
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-import json
 import os
 
 class Settings(BaseSettings):
+    """
+    Global Application Settings.
+    Validates environment variables on startup.
+    """
+    
     # --- 1. General Info ---
     PROJECT_NAME: str = "DECODE Energy Router"
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
+    
+    # Environment: development, staging, production
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
-    # --- 2. Security & Auth (FIXED: Added Defaults) ---
-    SECRET_KEY: str = "dev_insecure_secret_key"
+    # --- 2. Security & Auth ---
+    SECRET_KEY: str = "dev-secret-key-change-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
+    
+    # CORS (Cross-Origin Resource Sharing)
+    BACKEND_CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8000"]
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+        """Parses a comma-separated string of origins into a list."""
         if isinstance(v, str) and not v.startswith("["):
             return [i.strip() for i in v.split(",")]
         elif isinstance(v, (list, str)):
             return v
         raise ValueError(v)
 
-    # --- 3. Infrastructure (FIXED: Added Defaults) ---
-    DATABASE_URL: str = "sqlite:///./dev.db" 
-    REDIS_URL: str = "redis://localhost:6379"
+    # --- 3. Database (PostgreSQL) - Optional for MVP ---
+    DATABASE_URL: Optional[str] = None
 
-    # --- 4. Physics Engine ---
+    # --- 4. Cache & Queue (Redis) - Optional for MVP ---
+    REDIS_URL: Optional[str] = None
+
+    # --- 5. Physics & AI Engine ---
     MODEL_PATH: str = "assets/models/pinn_traced.pt"
-    PHYSICS: Dict[str, Any] = {}
+    
+    # Physics Tolerances (Governance)
+    MAX_VOLTAGE_PU: float = 1.05
+    MIN_VOLTAGE_PU: float = 0.95
+    PHYSICS_RESIDUAL_THRESHOLD: float = 1e-3
+    
+    # Physics Dictionary for backward compatibility
+    PHYSICS: Dict[str, float] = {
+        "min_voltage_pu": 0.9,
+        "max_freq_dev_hz": 0.5
+    }
+
+    # --- 6. Edge Specifics ---
     EDGE_DEVICE_ID: str = "dev_local"
     
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_file_encoding="utf-8",
         case_sensitive=True,
-        extra="ignore" 
+        extra="ignore"
     )
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._load_physics_constants()
-
-    def _load_physics_constants(self):
-        search_paths = [
-            "physics_core/constants/grid_parameters.json",
-            "../physics_core/constants/grid_parameters.json",
-            "/content/decode-energy-router/physics_core/constants/grid_parameters.json"
-        ]
-        
-        loaded = False
-        for path in search_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r') as f:
-                        data = json.load(f)
-                    limits = data.get("operational_limits", {}).get("voltage", {})
-                    self.PHYSICS = {
-                        "min_voltage_pu": limits.get("min_pu", 0.9),
-                        "max_voltage_pu": limits.get("max_pu", 1.1),
-                        "max_freq_dev_hz": 0.5,
-                        "raw_data": data 
-                    }
-                    loaded = True
-                    break
-                except Exception:
-                    pass
-
-        if not loaded:
-            self.PHYSICS = {"min_voltage_pu": 0.9, "max_voltage_pu": 1.1, "max_freq_dev_hz": 0.5}
-
+# --- Singleton Instance ---
 settings = Settings()
-"""
 
-os.makedirs("backend/app/core", exist_ok=True)
-with open("backend/app/core/config.py", "w") as f:
-    f.write(config_content)
-print("✅ Fixed config.py")
+# --- Logging Configuration ---
+LOGGING_CONFIG: Dict[str, Any] = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "default",
+        },
+    },
+    "root": {
+        "level": "INFO" if settings.ENVIRONMENT == "production" else "DEBUG",
+        "handlers": ["console"],
+    },
+}
