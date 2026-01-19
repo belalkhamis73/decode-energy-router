@@ -87,4 +87,14 @@ class SwingEquation(nn.Module):
     def __repr__(self):
         """Self-documenting string representation."""
         return f"SwingEquation(H={self.two_h.item()/2:.2f}s, D={self.d_dump.item():.2f}pu)"
-      
+
+# --- CRITICAL ADDITION: The Helper Function ---
+def calculate_freq_deviation(power_mismatch: float, inertia_h: float = 5.0, dt: float = 0.1) -> float:
+    """
+    Simple wrapper to estimate frequency deviation.
+    Used by the Backend API for quick approximation without running the full ODE solver.
+    
+    Formula: dw = (Pm - Pe) * dt / (2 * H)
+    """
+    if inertia_h <= 0: return 0.0
+    return (power_mismatch * dt) / (2.0 * inertia_h)
