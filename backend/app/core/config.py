@@ -1,7 +1,6 @@
 # @title 🛠️ Fix Configuration (Overwrite config.py)
 import os
 
-# We write the full file content with defaults and JSON loading logic
 config_content = """
 \"\"\"
 Core Configuration Module (Patched for Dev).
@@ -29,7 +28,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # --- 2. Security & Auth ---
-    # FIXED: Added default value for dev environment
+    # FIXED: Added default value for dev environment to prevent ValidationError
     SECRET_KEY: str = "dev_secret_key_insecure_do_not_use_in_prod"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
@@ -45,7 +44,8 @@ class Settings(BaseSettings):
         raise ValueError(v)
 
     # --- 3. Infrastructure (DB & Cache) ---
-    # FIXED: Changed types to 'str' and added SQLite/Localhost defaults
+    # FIXED: Changed strict types to 'str' and added SQLite/Localhost defaults
+    # This prevents the 'Field required' error in environments without .env files
     DATABASE_URL: str = "sqlite:///./dev.db" 
     REDIS_URL: str = "redis://localhost:6379"
 
@@ -104,15 +104,15 @@ class Settings(BaseSettings):
 
         if not loaded:
             print("⚠️ Physics Config Not Found. Using Hardcoded Safe Defaults.")
+            # Safe defaults to prevent system crash if JSON is missing
             self.PHYSICS = {"min_voltage_pu": 0.9, "max_voltage_pu": 1.1, "max_freq_dev_hz": 0.5}
 
 # --- Singleton Instance ---
 settings = Settings()
 """
 
-# Overwrite the file
 os.makedirs("backend/app/core", exist_ok=True)
 with open("backend/app/core/config.py", "w") as f:
     f.write(config_content)
 
-print("✅ backend/app/core/config.py patched successfully!")
+print("✅ backend/app/core/config.py fixed! Defaults added for missing env vars.")
