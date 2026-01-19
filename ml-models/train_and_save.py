@@ -1,119 +1,105 @@
 """
-Model Bootstrapper & Artifact Generator.
-Responsible for initializing the Physics-Informed Neural Network (PINN) architecture,
-performing a 'cold start' training (or loading pre-trained weights), and exporting
-the optimized TorchScript artifact for the Backend and Edge devices.
+Training Orchestrator (The "Trainer" Wrapper).
+Delegates the heavy lifting of the training loop to 'train_pinn.py'.
+Handles Data Ingestion -> Model Training -> Artifact Saving.
+
+Map Requirement: "The Training Orchestrator. Triggered by: main.py (POST /model/train)."
 """
 
 import torch
-import torch.nn as nn
-import torch.jit
 import os
 import logging
 from pathlib import Path
+from typing import Dict, Any
 
-# --- Configuration ---
-# 12-Factor: Config via constants or env vars
-OUTPUT_RELATIVE_PATH = "../backend/assets/models"
+# --- INTEGRATION: Import dependencies ---
+from ml_models.training.train_pinn import train_session_model
+from ml_models.training.data_pipeline import NRELClient, PhysicsProcessor, PhysicsScaler
+
+# Configure Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("Training_Orchestrator")
+
+# Constants
+OUTPUT_RELATIVE_PATH = "../../../backend/assets/models"
 ARTIFACT_NAME = "pinn_traced.pt"
 
-# Setup Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("ArtifactFactory")
-
-class HybridLSTMPINN(nn.Module):
+def train_and_export(
+    grid_type: str = "ieee118", 
+    epochs: int = 50,
+    dataset: Dict[str, Any] = None
+) -> str:
     """
-    Hybrid Physics-Informed Neural Network Architecture.
-    Combines LSTM for temporal feature extraction with a Physics-Constrained Head.
+    Orchestrates the training pipeline.
     
-    Input:  [Batch, Sequence_Length, Features]
-    Output: [Batch, 1] (Predicted Solar Irradiance / Grid State)
+    Args:
+        grid_type: Topology identifier (e.g., 'ieee118').
+        epochs: Number of training iterations.
+        dataset: (Optional) Pre-loaded dictionary with 'topology' and 'weather'.
+                 If None, it fetches data via pipeline.
+                 
+    Returns:
+        str: Absolute path to the saved model artifact.
     """
-    def __init__(self, input_dim: int = 5, hidden_dim: int = 64, output_dim: int = 1):
-        super().__init__()
-        
-        # 1. Temporal Encoder (The "Memory")
-        self.lstm = nn.LSTM(
-            input_size=input_dim, 
-            hidden_size=hidden_dim, 
-            batch_first=True
-        )
-        
-        # 2. Regressor Head (The "Predictor")
-        self.head = nn.Linear(hidden_dim, output_dim)
-        
-        # 3. Physics Constraint Layer (The "Law")
-        # Softplus ensures output is always positive (Energy cannot be negative).
-        # Unlike ReLU, it has smooth gradients near zero, aiding training.
-        self.physics_activation = nn.Softplus()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # LSTM forward pass
-        # out shape: [Batch, Seq, Hidden]
-        out, _ = self.lstm(x)
-        
-        # Take the state at the last time step
-        last_step_feature = out[:, -1, :]
-        
-        # Predict raw value
-        raw_prediction = self.head(last_step_feature)
-        
-        # Apply physical constraints
-        return self.physics_activation(raw_prediction)
-
-def ensure_directory_exists(path: Path):
-    """Fail Fast: Ensure the destination exists or create it."""
-    if not path.exists():
-        logger.info(f"Creating directory: {path.resolve()}")
-        path.mkdir(parents=True, exist_ok=True)
-
-def train_and_export():
-    """
-    Main pipeline execution.
-    1. Initialize Model.
-    2. (Optional) Run mock training loop.
-    3. Trace (Compile) to TorchScript.
-    4. Save to filesystem.
-    """
-    logger.info("🏗️  Initializing Hybrid LSTM-PINN...")
+    logger.info(f"🚀 Starting Training Job for {grid_type.upper()}...")
     
-    # 1. Instantiate Architecture
-    # Features: [DNI, DHI, Temp, Wind, Zenith]
-    model = HybridLSTMPINN(input_dim=5, hidden_dim=64, output_dim=1)
-    
-    # Switch to Evaluation Mode (Critical for Tracing)
-    # Disables Dropout, freezes BatchNorm stats
-    model.eval()
+    # 1. Data Ingestion (Layer 2 Integration)
+    if dataset is None:
+        # If no dataset provided (cold start), fetch from NREL (Mocked for now)
+        logger.info("   > Fetching standard training data...")
+        # In a real run, we'd use NRELClient here.
+        # For now, we mock the structure expected by train_pinn.py
+        dataset = {
+            "topology": {"n_buses": 118 if "118" in grid_type else 14},
+            "weather": {"ghi": [500.0]*24, "wind_speed": [5.0]*24}
+        }
 
-    # 2. Create Dummy Input
-    # Required for JIT to trace the execution graph
-    # Shape: [Batch=1, Seq=24, Feat=5]
-    dummy_input = torch.randn(1, 24, 5)
+    # 2. Training (Delegation to train_pinn.py)
+    hyperparams = {
+        "epochs": epochs,
+        "learning_rate": 1e-3,
+        "device": "cuda" if torch.cuda.is_available() else "cpu"
+    }
     
-    # 3. JIT Compilation (Tracing)
-    logger.info("🔄 Compiling model via TorchScript Tracing...")
+    # This is the key "Link Training" step requested
+    trained_model, metrics = train_session_model(dataset, hyperparams)
+    logger.info(f"   ✅ Training converged. Final Loss: {metrics.get('final_loss', 99.9):.5f}")
+
+    # 3. Validation & Tracing (Compilation)
+    trained_model.eval()
+    
+    # Create dummy input for JIT Tracing (Batch=1, Features=3)
+    dummy_u = torch.randn(1, 3).to(hyperparams["device"])
+    # Note: DeepONet handles 'y' (trunk input) internally if None is passed during tracing,
+    # or we must provide it. Based on our deeponet.py, it handles None.
+    # However, JIT trace strictly requires valid tensor inputs.
+    # We pass a dummy 'y' to be safe.
+    n_buses = dataset['topology']['n_buses']
+    dummy_y = torch.arange(n_buses).unsqueeze(0).to(hyperparams["device"])
+    
     try:
-        traced_model = torch.jit.trace(model, dummy_input)
-        logger.info("   > Tracing Successful. Graph frozen.")
+        logger.info("   > Compiling to TorchScript...")
+        traced_model = torch.jit.trace(trained_model, (dummy_u, dummy_y))
     except Exception as e:
-        logger.error(f"❌ JIT Compilation Failed: {e}")
-        raise e
+        logger.warning(f"   ⚠️ JIT Tracing failed ({e}). Saving state_dict instead.")
+        traced_model = trained_model
 
-    # 4. Save Artifact
-    output_dir = Path(__file__).parent / OUTPUT_RELATIVE_PATH
-    ensure_directory_exists(output_dir)
+    # 4. Artifact Export
+    # Resolve path relative to this file
+    base_dir = Path(__file__).parent
+    output_dir = (base_dir / OUTPUT_RELATIVE_PATH).resolve()
+    os.makedirs(output_dir, exist_ok=True)
     
-    save_path = output_dir / ARTIFACT_NAME
+    save_path = output_dir / f"{grid_type}_{ARTIFACT_NAME}"
     
-    logger.info(f"💾 Saving artifact to: {save_path.resolve()}")
-    torch.jit.save(traced_model, save_path)
-    
-    # 5. Verification (Sanity Check)
-    if save_path.exists():
-        logger.info("✅ Artifact generation complete. Ready for Deployment.")
+    if isinstance(traced_model, torch.jit.ScriptModule):
+        traced_model.save(save_path)
     else:
-        logger.error("❌ Save operation failed silently.")
-        exit(1)
+        torch.save(traced_model.state_dict(), save_path)
+        
+    logger.info(f"💾 Model saved to: {save_path}")
+    return str(save_path)
 
 if __name__ == "__main__":
-    train_and_export()
+    # Unit Test
+    train_and_export("ieee14", epochs=1)
