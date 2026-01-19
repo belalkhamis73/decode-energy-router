@@ -1,11 +1,11 @@
 """
 Data Manager Service.
-Central repository for 'Valuable Inputs' (Grid Topologies & Weather Contexts).
+Central repository for 'Valuable Inputs' (Grid Topologies, Weather Contexts, & Asset Profiles).
 
-Responsible for:
-1. Loading standard IEEE Benchmarks (14, 30, 118 bus) via Pandapower.
-2. Converting physical grids into Graph representations (Adjacency Matrices) for DeepONet.
-3. Generating synthetic 'NREL-like' weather profiles for rapid prototyping.
+Key Integrations:
+1. Grid Topology: Loads IEEE 14/118 via Pandapower.
+2. Weather Generation: Uses TimeGAN for 'Black Swan' chaos scenarios.
+3. V2G Modeling: Generates stochastic EV availability profiles based on office/home patterns.
 """
 
 import logging
@@ -14,7 +14,16 @@ import pandas as pd
 import pandapower as pp
 import pandapower.networks as pn
 import networkx as nx
+import torch
 from typing import Dict, Any, List, Optional
+
+# --- Import TimeGAN for Chaos Generation ---
+# Wrapped in try/except to prevent system crash if ML dependencies are missing
+try:
+    from ml_models.training.timegan_generator import TimeGANGenerator, TimeGANConfig
+    TIMEGAN_AVAILABLE = True
+except ImportError:
+    TIMEGAN_AVAILABLE = False
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -34,147 +43,144 @@ class DataManager:
 
     def get_topology(self, grid_name: str) -> Dict[str, Any]:
         """
-        Loads a standard IEEE grid and converts it to a graph representation
-        suitable for the Physics-Informed DeepONet.
-        
-        Args:
-            grid_name: 'ieee14', 'ieee30', or 'ieee118'
-            
-        Returns:
-            Dictionary containing:
-            - n_buses: Total number of nodes (Critical for DeepONet resizing)
-            - adj_matrix: Dense adjacency matrix (Connections)
-            - bus_features: Static features (Voltage limits)
-            - line_params: Physics parameters (Resistance/Reactance) for Loss calculation
+        Loads a standard IEEE grid and converts it to a graph representation.
+        Correctly distinguishes between IEEE 14 and 118 bus systems.
         """
         grid_name = grid_name.lower().strip()
-        
-        if grid_name not in self.SUPPORTED_GRIDS:
-            raise ValueError(f"Grid '{grid_name}' not supported. Available: {self.SUPPORTED_GRIDS}")
-
         logger.info(f"🔌 Loading Grid Topology: {grid_name.upper()}...")
 
         # 1. Load Standard Network from Pandapower
-        if grid_name == "ieee14":
-            net = pn.case14()
-        elif grid_name == "ieee30":
-            net = pn.case30()
-        elif grid_name == "ieee118":
+        if "118" in grid_name:
             net = pn.case118()
+            n_buses = 118
+        elif "30" in grid_name:
+            net = pn.case30()
+            n_buses = 30
+        else:
+            # Default to IEEE 14 (Standard Microgrid)
+            net = pn.case14()
+            n_buses = 14
             
         # 2. Construct Graph Representation (Physics Core)
-        # We need an Adjacency Matrix A where A[i,j] = 1 if connected
-        # DeepONet uses this to understand the 'Trunk' (Location) space.
-        
-        # Create NetworkX graph from lines
-        # MultiGraph=False ensures we flatten parallel lines for the simple adjacency
+        # Create NetworkX graph from lines for adjacency matrix
         mg = pp.topology.create_nxgraph(net, include_lines=True, include_trafo=True, multi=False)
-        
-        # Get Adjacency Matrix (Sorted by Bus ID to ensure alignment)
-        # This maps the physical topology to the Neural Network's input
         adj_matrix = nx.to_numpy_array(mg, nodelist=sorted(mg.nodes()))
         
-        # 3. Extract Physics Parameters (for Constraints/Loss)
-        # Resistance (R) and Reactance (X) are needed for the Power Flow Equation
+        # 3. Extract Physics Parameters
         n_lines = len(net.line)
-        r_ohm = net.line['r_ohm_per_km'].values
-        x_ohm = net.line['x_ohm_per_km'].values
-        
-        # 4. Extract Bus Constraints (Safety Limits)
-        # Used by the Projection Layer to clamp predictions
-        n_buses = len(net.bus)
-        vm_min = net.bus['min_vm_pu'].fillna(0.9).values # Default IEEE lower bound
-        vm_max = net.bus['max_vm_pu'].fillna(1.1).values # Default IEEE upper bound
+        r_lines = net.line['r_ohm_per_km'].values if 'r_ohm_per_km' in net.line else np.zeros(n_lines)
+        x_lines = net.line['x_ohm_per_km'].values if 'x_ohm_per_km' in net.line else np.zeros(n_lines)
         
         topology_data = {
             "name": grid_name,
-            "n_buses": int(n_buses),  # <--- Input for DeepONet __init__
+            "n_buses": int(n_buses),
             "n_lines": int(n_lines),
-            "adj_matrix": adj_matrix, # <--- Input for Graph Convolutions (if added later)
-            "bus_constraints": {
-                "vm_min": vm_min,
-                "vm_max": vm_max
-            },
+            "adj_matrix": adj_matrix,
             "physics_params": {
-                "r_lines": r_ohm,
-                "x_lines": x_ohm
+                "r_lines": r_lines,
+                "x_lines": x_lines
             }
         }
         
         logger.info(f"   > Loaded {n_buses} Buses and {n_lines} Lines.")
         return topology_data
 
-    def get_weather_profile(self, profile_type: str = "solar_egypt") -> Dict[str, List[float]]:
+    def get_weather_profile(self, profile_type: str = "solar_egypt", scenario: str = "normal") -> Dict[str, List[float]]:
         """
-        Generates a synthetic 24-hour weather profile mimicking NREL datasets.
-        Used to feed the 'Branch Net' (Input Function) of the DeepONet.
+        Generates environmental context.
         
         Args:
-            profile_type: 'solar_egypt' (High GHI), 'wind_north' (High Wind), 'storm' (Chaos)
+            profile_type: 'solar_egypt', 'wind_north'
+            scenario: 'normal' (NREL-like curves) or 'black_swan' (TimeGAN Chaos)
             
         Returns:
-            Dictionary with 24-step time-series for GHI, Wind, Temp.
+            Dictionary with 24-step time-series for GHI, Wind, Temp, and V2G Availability.
         """
-        logger.info(f"☀️  Generating Weather Context: {profile_type}...")
+        logger.info(f"☀️  Generating Context: {profile_type} [{scenario.upper()}]")
         
-        # Time axis: 0 to 23 hours
+        # A. BLACK SWAN SCENARIO (TimeGAN)
+        if scenario == "black_swan" and TIMEGAN_AVAILABLE:
+            try:
+                # Initialize Generator with default config
+                config = TimeGANConfig(seq_len=24, feature_dim=3)
+                generator = TimeGANGenerator(config)
+                
+                # Generate synthetic sample [1, 24, 3]
+                # In production, we would load pre-trained weights here
+                z = torch.randn(1, 24, 3) 
+                synthetic_data = generator(z).detach().numpy()[0] # [24, 3]
+                
+                # Denormalize (Mocking the scaler logic)
+                ghi = np.clip(synthetic_data[:, 0] * 1400, 0, 1400)
+                wind = np.clip(synthetic_data[:, 1] * 30, 0, 30)
+                temp = (synthetic_data[:, 2] * 40) + 10
+                
+                logger.info("   > Generated Synthetic Chaos Event via TimeGAN")
+                
+            except Exception as e:
+                logger.error(f"   ❌ TimeGAN Failed: {e}. Falling back to standard generation.")
+                ghi, wind, temp = self._generate_standard_profile(profile_type)
+        
+        # B. STANDARD SCENARIO (NREL Curves)
+        else:
+            ghi, wind, temp = self._generate_standard_profile(profile_type)
+
+        # C. V2G STOCHASTIC MODELING
+        # Generates EV fleet availability based on time-of-day probabilities
+        v2g_profile = self._generate_v2g_availability()
+
+        return {
+            "time_step": np.linspace(0, 23, 24).tolist(),
+            "ghi": ghi.tolist(),
+            "wind_speed": wind.tolist(),
+            "temperature": temp.tolist(),
+            "v2g_availability_kw": v2g_profile.tolist() # New Data Source for Router
+        }
+
+    def _generate_standard_profile(self, profile_type: str):
+        """Helper to generate standard Gaussian/Sinusoidal curves."""
         t = np.linspace(0, 23, 24)
         
-        # Base Profiles
         if "solar" in profile_type:
-            # Solar: Gaussian Curve peaking at 1 PM (t=13)
-            # Peak irradiance ~1050 W/m2 (Egypt Summer)
+            # Solar Peak at 1 PM
             ghi = 1050 * np.exp(-0.5 * ((t - 13) / 3.5)**2)
-            
-            # Temperature: Follows solar with lag
             temp = 25 + (ghi / 50) + np.random.normal(0, 1, 24)
-            
-            # Wind: Moderate breeze
             wind = 5 + 2 * np.sin(t / 4) + np.random.normal(0, 1, 24)
-            
         elif "wind" in profile_type:
-            # Solar: Weaker (Winter/Cloudy)
             ghi = 600 * np.exp(-0.5 * ((t - 12) / 4)**2)
-            
-            # Wind: Stronger, more volatile
             wind = 12 + 8 * np.sin(t / 3) + np.random.normal(0, 3, 24)
-            wind = np.clip(wind, 0, 30) # Max wind speed
-            
             temp = 15 + np.random.normal(0, 2, 24)
-            
         else:
-            # Default / Fallback
             ghi = np.zeros(24)
             wind = np.zeros(24)
             temp = np.ones(24) * 20
-
-        # Add stochastic noise (Sensor noise simulation)
+            
+        # Add sensor noise
         ghi = np.clip(ghi + np.random.normal(0, 20, 24), 0, 1400)
-        
-        return {
-            "time_step": t.tolist(),
-            "ghi": ghi.tolist(),          # Global Horizontal Irradiance (W/m^2)
-            "wind_speed": wind.tolist(),  # m/s
-            "temperature": temp.tolist()  # Celsius
-        }
+        return ghi, wind, temp
 
-# Global Instance for Singleton Access in API
+    def _generate_v2g_availability(self) -> np.ndarray:
+        """
+        Simulates availability of EV Fleet for Vehicle-to-Grid services.
+        Logic:
+        - 08:00 - 18:00 (Work): High availability (Office Parking)
+        - 18:00 - 08:00 (Home): Lower availability (Residential charging priority)
+        """
+        t = np.linspace(0, 23, 24)
+        
+        # Base availability curve (High during day, low at night)
+        # Sigmoid function to smooth transitions
+        work_hours = 1 / (1 + np.exp(-(t - 8))) - 1 / (1 + np.exp(-(t - 18)))
+        
+        # Scale to kW (e.g., 20 cars * 7kW charger = ~140kW max)
+        base_capacity = 140.0 
+        availability = base_capacity * (0.3 + 0.7 * work_hours) 
+        
+        # Add stochastic uncertainty (drivers leaving early, traffic, etc.)
+        noise = np.random.normal(0, 10, 24)
+        availability = np.clip(availability + noise, 0, base_capacity)
+        
+        return availability
+
+# Global Instance
 data_manager = DataManager()
-
-# --- Unit Test (Manual Verification) ---
-if __name__ == "__main__":
-    # Simulate User Input logic
-    test_grid = "ieee118"
-    
-    try:
-        data = data_manager.get_topology(test_grid)
-        print(f"\n✅ Successfully Loaded {test_grid.upper()}")
-        print(f"   Buses: {data['n_buses']}")
-        print(f"   Adjacency Shape: {data['adj_matrix'].shape}")
-        
-        weather = data_manager.get_weather_profile("solar_egypt")
-        print(f"✅ Generated Weather: {len(weather['ghi'])} time steps")
-        print(f"   Peak Solar: {max(weather['ghi']):.2f} W/m^2")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
