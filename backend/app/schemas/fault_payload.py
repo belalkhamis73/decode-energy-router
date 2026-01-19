@@ -1,81 +1,97 @@
-# @title 🛠️ Fix 1: Update Schemas (fault_payload.py)
-import os
-
-schema_content = """
-\"\"\"
+"""
 Fault Scenario Schemas.
 Defines the structure and validation rules for simulation requests.
 Ensures only physically plausible scenarios are passed to the Digital Twin.
-\"\"\"
+Unifies legacy access (main.py) with modern validation (simulation.py).
+"""
 
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Literal
+from typing import Optional
+from enum import Enum
 from datetime import datetime
-from enum import Enum  # <--- CRITICAL IMPORT
 
 # --- Enums for Strict Typing ---
-# FIXED: Inherit from (str, Enum) so Pydantic v2 generates valid schemas
-class ComponentType(str, Enum):
-    LINE = "line"
-    BUS = "bus"
-    TRANSFORMER = "transformer"
-    GENERATOR = "generator"
-
 class FaultType(str, Enum):
     THREE_PHASE = "3ph_short"
     LINE_TO_GROUND = "1ph_ground"
     LOSS_OF_GENERATION = "gen_trip"
     LOAD_SPIKE = "load_surge"
     CLOUD_COVER = "cloud_gorilla" 
+    NONE = "none"
 
-# --- Input Schema (Request) ---
-class FaultScenario(BaseModel):
-    \"\"\"
-    Payload for triggering a 'What-If' contingency analysis.
-    \"\"\"
-    timestamp: datetime = Field(..., description="UTC timestamp for the simulation start.")
-    target_component: str = Field(..., example="Line_1-2", description="ID of the grid asset to fail.")
-    
-    # Use the Enum class as the type annotation
-    component_type: ComponentType = Field(..., description="Category of the asset.")
-    
-    fault_type: FaultType = Field(..., description="The physics of the failure mode.")
+class ComponentType(str, Enum):
+    LINE = "line"
+    BUS = "bus"
+    TRANSFORMER = "transformer"
+    GENERATOR = "generator"
+    UNKNOWN = "unknown"
+
+class FaultPayload(BaseModel):
+    """
+    Unified Payload for triggering a 'What-If' contingency analysis.
+    Compatible with legacy 'main.py' physics checks and modern 'simulation.py' routes.
+    """
+    # --- Core Fields ---
+    fault_type: FaultType = Field(
+        default=FaultType.NONE, 
+        description="The physics of the failure mode."
+    )
     
     magnitude: float = Field(
-        1.0, 
+        default=0.0, 
         ge=0.0, 
-        le=1.0, 
-        description="Severity of the fault (0.0 to 1.0)."
+        le=10.0, 
+        description="Severity of the fault (0.0 to 1.0 p.u. or multiplier)."
     )
     
-    duration_ms: int = Field(
-        100, 
-        ge=1, 
-        le=5000, 
-        description="Duration of the fault in milliseconds."
+    location_bus: int = Field(
+        default=0, 
+        ge=0, 
+        description="Bus index where fault occurred."
+    )
+    
+    duration_sec: float = Field(
+        default=0.0, 
+        ge=0.0, 
+        description="Duration of the fault in seconds."
     )
 
+    # --- Metadata (Optional) ---
+    timestamp: Optional[datetime] = Field(
+        default=None, 
+        description="UTC timestamp for the simulation start."
+    )
+    
+    target_component: Optional[str] = Field(
+        default=None, 
+        example="Line_1-2", 
+        description="ID of the grid asset to fail."
+    )
+
+    # --- COMPATIBILITY PROPERTIES (The Fix) ---
+    # These properties allow main.py to access attributes it expects 
+    # without needing to rewrite the main logic.
+
+    @property
+    def is_active(self) -> bool:
+        """
+        Legacy compatibility for main.py: 
+        Checks if fault is actually active based on magnitude and type.
+        """
+        return self.magnitude > 0 and self.fault_type != FaultType.NONE
+
+    @property
+    def magnitude_pu(self) -> float:
+        """
+        Legacy compatibility for main.py: 
+        Alias for 'magnitude' to satisfy legacy physics calculations.
+        """
+        return self.magnitude
+
+    # --- Validators ---
     @field_validator('target_component')
     @classmethod
     def validate_component_id(cls, v: str) -> str:
-        if len(v) > 50 or " " in v:
+        if v and (len(v) > 50 or " " in v):
             raise ValueError("Invalid Component ID format.")
         return v
-
-# --- Output Schema (Response) ---
-class GridState(BaseModel):
-    voltages: List[float]
-    frequency: float
-    stability_margin: float
-
-class SimulationResult(BaseModel):
-    timestamp: datetime
-    grid_state: GridState
-    physics_violation_detected: bool
-    computation_time_ms: Optional[float] = None
-"""
-
-os.makedirs("backend/app/schemas", exist_ok=True)
-with open("backend/app/schemas/fault_payload.py", "w") as f:
-    f.write(schema_content)
-print("✅ Fixed fault_payload.py")
