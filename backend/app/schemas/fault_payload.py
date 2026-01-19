@@ -1,4 +1,4 @@
-# @title 🛠️ Fix 1: Pydantic Schema (fault_payload.py)
+# @title 🛠️ Fix 1: Update Schemas (fault_payload.py)
 import os
 
 schema_content = """
@@ -78,4 +78,4 @@ class SimulationResult(BaseModel):
 os.makedirs("backend/app/schemas", exist_ok=True)
 with open("backend/app/schemas/fault_payload.py", "w") as f:
     f.write(schema_content)
-print("✅ Fixed fault_payload.py (Converted classes to Enums)")
+print("✅ Fixed fault_payload.py")
