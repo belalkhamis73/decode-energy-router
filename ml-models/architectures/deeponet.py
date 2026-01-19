@@ -1,164 +1,145 @@
 """
 Deep Operator Network (DeepONet) Architecture.
-Learns the solution operator for power flow equations (V = G(P, Q)), enabling 
-sub-millisecond active energy routing by mapping input Load/Weather profiles (Branch) 
-to Grid State trajectories at specific Bus locations (Trunk).
+Learns the solution operator for power flow equations (V = G(P, Q)).
 
-Alterations for SaaS:
-- Added 'n_buses' to __init__ for dynamic topology sizing (IEEE 14 vs 118).
-- Added Embedding layer to TrunkNet to handle discrete grid locations.
+Integration Update:
+- Physically embeds the 'HardConstraintProjection' layer as the final output block.
+- Ensures all predictions strictly adhere to voltage limits (0.9 - 1.1 p.u.) during inference.
+
+Map Requirement: "architectures/projection_layer.py: Inside: deeponet.py."
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Optional, Tuple
 
-class BranchNet(nn.Module):
-    """
-    Encodes the Input Function Space 'u'.
-    Context: The environmental and operational conditions (Weather + Load).
-    Input: [Batch, Sensor_Dim] (e.g., Solar Irradiance, Wind Speed, Total Load).
-    Output: [Batch, Latent_Dim] (The encoded 'Context' vector).
-    """
-    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.Tanh(),  # Tanh is standard for operator learning (smooth gradients)
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, latent_dim)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-class TrunkNet(nn.Module):
-    """
-    Encodes the Domain Space 'y'.
-    Context: The discrete locations on the grid (Bus IDs).
-    
-    Alteration: Uses an Embedding layer instead of continuous coordinates
-    to map discrete Bus IDs (0...N) to a dense vector space.
-    """
-    def __init__(self, n_buses: int, hidden_dim: int, latent_dim: int):
-        super().__init__()
-        
-        # Dynamic Resizing: Maps discrete Bus IDs (0 to n_buses-1) to dense vectors
-        # This allows the same architecture code to handle IEEE 14 or IEEE 118
-        self.bus_embedding = nn.Embedding(num_embeddings=n_buses, embedding_dim=hidden_dim)
-        
-        self.net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, latent_dim)
-        )
-
-    def forward(self, bus_ids: torch.Tensor) -> torch.Tensor:
-        # bus_ids shape: [Batch, N_Query_Buses]
-        
-        # 1. Embed discrete IDs -> Dense Vectors
-        # Shape: [Batch, N_Query_Buses, Hidden_Dim]
-        x = self.bus_embedding(bus_ids)
-        
-        # 2. Process through MLP
-        # Shape: [Batch, N_Query_Buses, Latent_Dim]
-        return self.net(x)
+# --- INTEGRATION: Import Projection Layer ---
+try:
+    from ml_models.architectures.projection_layer import HardConstraintProjection
+except ImportError:
+    # Fallback for localized testing if absolute path fails
+    import sys
+    import os
+    sys.path.append(os.getcwd())
+    from ml_models.architectures.projection_layer import HardConstraintProjection
 
 class DeepONet(nn.Module):
     """
-    The Operator: G(u)(y).
-    Computes the dot product between the Context (Branch) and the Location (Trunk).
+    Physics-Informed DeepONet with Integrated Safety Layer.
+    
+    Structure:
+    1. Branch Net: Encodes Input Function u (Weather/Load Context).
+    2. Trunk Net: Encodes Output Location y (Grid Bus IDs).
+    3. Dot Product: Merges Context + Location.
+    4. Bias: System-wide offset.
+    5. Projection: Hard constraints on Voltage (Safety Valve).
     """
-    def __init__(self, 
-                 input_dim: int = 3,     # [Solar, Wind, Load]
-                 hidden_dim: int = 64, 
-                 output_dim: int = 1,    # Voltage Magnitude
-                 n_buses: int = 14,      # Default to IEEE 14, but dynamic
-                 latent_dim: int = 64):
+    def __init__(self, input_dim: int = 3, hidden_dim: int = 64, output_dim: int = 1, n_buses: int = 14):
         super().__init__()
-        
         self.n_buses = n_buses
         
-        # 1. The Branch (Weather/Load Encoder)
-        self.branch = BranchNet(input_dim, hidden_dim, latent_dim)
+        # 1. Branch Net (Context Encoder)
+        # Input: [Solar, Wind, Load] -> Latent Vector
+        self.branch = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
         
-        # 2. The Trunk (Grid Location Encoder)
-        # Note: This is where we injected the 'n_buses' alteration
-        self.trunk = TrunkNet(n_buses, hidden_dim, latent_dim)
+        # 2. Trunk Net (Location Encoder)
+        # Input: Bus ID or Coordinate -> Latent Vector
+        # We use an Embedding layer for discrete bus locations
+        self.trunk_embedding = nn.Embedding(n_buses, hidden_dim)
+        self.trunk = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
         
-        # 3. Bias term for the final regression
+        # 3. System Bias
         self.bias = nn.Parameter(torch.zeros(1))
+        
+        # 4. SAFETY INTEGRATION: Projection Layer
+        # Enforces V_min <= V <= V_max
+        self.projection = HardConstraintProjection(num_nodes=n_buses)
 
-    def forward(self, u: torch.Tensor, bus_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, u: torch.Tensor, y: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
+        Forward Pass with Physics Enforcement.
+        
         Args:
-            u: Input conditions [Batch, Input_Dim] 
-               (e.g., current solar/wind/load)
-            bus_ids: The specific buses we want to check [Batch, N_Query_Buses]
-               (e.g., checking all 118 buses at once)
+            u: Input features [Batch, Input_Dim] (Weather + Load).
+            y: (Optional) Specific Bus IDs to query [Batch, Query_Size].
+               If None, predicts for ALL buses in the grid topology.
                
         Returns:
-            Prediction: [Batch, N_Query_Buses] (Voltage at these buses)
+            Voltage Vector [Batch, N_Buses] (Projected onto valid manifold).
         """
-        # 1. Encode Condition (Branch)
-        # Shape: [Batch, Latent_Dim]
-        b_out = self.branch(u) 
+        batch_size = u.shape[0]
         
-        # 2. Encode Locations (Trunk)
-        # Shape: [Batch, N_Query_Buses, Latent_Dim]
-        t_out = self.trunk(bus_ids) 
+        # A. Branch Output (Context)
+        # Shape: [Batch, Hidden]
+        b_out = self.branch(u)
         
-        # 3. Operator Composition (Dot Product)
-        # We need to broadcast b_out to match the number of buses in t_out
-        # b_out expanded: [Batch, 1, Latent_Dim]
-        # t_out:          [Batch, N, Latent_Dim]
+        # B. Trunk Output (Location)
+        if y is None:
+            # If no specific buses requested, predict for ALL buses
+            # Create IDs: [0, 1, ..., N_Buses-1] repeated for batch
+            bus_ids = torch.arange(self.n_buses, device=u.device).expand(batch_size, -1)
+        else:
+            bus_ids = y
+            
+        # Shape: [Batch, N_Buses, Hidden]
+        t_out = self.trunk(self.trunk_embedding(bus_ids))
         
-        # Element-wise product + Sum over latent dimension
-        # Result: [Batch, N_Query_Buses]
-        prediction = torch.sum(b_out.unsqueeze(1) * t_out, dim=2) + self.bias
+        # C. Operator Merge (Dot Product)
+        # Equation: G(u)(y) = Sum(Branch_k * Trunk_k) + Bias
+        # b_out: [Batch, 1, Hidden]
+        # t_out: [Batch, N_Buses, Hidden]
+        # Result: [Batch, N_Buses]
+        raw_prediction = torch.sum(b_out.unsqueeze(1) * t_out, dim=2) + self.bias
         
-        return prediction
+        # D. PHYSICS INTEGRATION (The Requirement)
+        # "Modify deeponet.py to actually contain the projection_layer.py"
+        
+        if self.training:
+            # During training, we might want soft gradients or raw values for loss calculation
+            # However, for strict physics compliance, we can project here too.
+            # We return raw_prediction to let the Loss Function handle penalties,
+            # OR return projected if we are doing "Projected Gradient Descent".
+            # For standard PINNs, we typically return raw and punish violations in loss.
+            return raw_prediction
+        else:
+            # INFERENCE MODE: Strict Safety
+            # Apply Hard Projection to ensure output is always valid (0.9 - 1.1 p.u.)
+            # We pass dummy A, b matrices as the layer handles bounds internally
+            projected_prediction = self.projection(raw_prediction, None, None)
+            return projected_prediction
 
-# --- Unit Test (Verification of Alterations) ---
+# --- Unit Test ---
 if __name__ == "__main__":
-    print("🔬 DeepONet Architecture Unit Test")
+    print("🔬 Testing Integrated DeepONet + Projection...")
     
-    # Simulation Parameters
-    BATCH_SIZE = 5
-    N_BUSES_IEEE118 = 118  # Testing the "Biggest Dataset" requirement
-    INPUT_FEATURES = 3     # Solar, Wind, Load
+    # Setup
+    model = DeepONet(n_buses=5)
+    model.eval() # Enable Inference Mode (activates Projection)
     
-    # 1. Instantiate Model with Dynamic Bus Count
-    model = DeepONet(
-        input_dim=INPUT_FEATURES, 
-        n_buses=N_BUSES_IEEE118
-    )
-    print(f"   ✅ Model Initialized for {model.n_buses} Buses (IEEE 118 Mode)")
+    # Mock Input (Batch=2, Features=3)
+    u_test = torch.randn(2, 3)
     
-    # 2. Create Dummy Data
-    # Weather/Load context
-    dummy_weather = torch.randn(BATCH_SIZE, INPUT_FEATURES)
+    # Forward Pass
+    # The output should be clamped between 0.9 and 1.1 automatically
+    v_out = model(u_test)
     
-    # Query: We want to predict voltage for ALL 118 buses at once
-    # Shape: [Batch, 118]
-    dummy_bus_ids = torch.arange(N_BUSES_IEEE118).unsqueeze(0).repeat(BATCH_SIZE, 1)
+    print(f"   Output Shape: {v_out.shape}")
+    print(f"   Min Voltage: {v_out.min().item():.4f} (Should be >= 0.9)")
+    print(f"   Max Voltage: {v_out.max().item():.4f} (Should be <= 1.1)")
     
-    # 3. Forward Pass
-    try:
-        output = model(dummy_weather, dummy_bus_ids)
-        
-        # 4. Check Shapes
-        expected_shape = (BATCH_SIZE, N_BUSES_IEEE118)
-        assert output.shape == expected_shape
-        
-        print(f"   ✅ Forward Pass Successful.")
-        print(f"      Input: {dummy_weather.shape} (Weather Context)")
-        print(f"      Query: {dummy_bus_ids.shape} (All Buses)")
-        print(f"      Output: {output.shape} (Voltage Prediction)")
-        
-    except Exception as e:
-        print(f"   ❌ Test Failed: {e}")
+    assert v_out.min() >= 0.9, "❌ Lower Bound Violation!"
+    assert v_out.max() <= 1.1, "❌ Upper Bound Violation!"
+    print("✅ Integration Verified: Physics Projection Active.")
