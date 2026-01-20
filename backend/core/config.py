@@ -574,4 +574,171 @@ class Settings(BaseSettings):
         default=8760,  # One year at hourly resolution
         description="Maximum simulation ticks"
     )
-    SIM
+    SIMULATION_PARALLEL_MODELS: bool = Field(
+        default=True,
+        description="Execute models in parallel"
+    )
+    
+    # ========================================================================
+    # SECURITY & AUTHENTICATION
+    # ========================================================================
+    
+    SECRET_KEY: str = Field(
+        default="your-secret-key-change-in-production",
+        env="SECRET_KEY",
+        description="JWT secret key"
+    )
+    ALGORITHM: str = Field(default="HS256", description="JWT algorithm")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=60,
+        description="Access token expiration"
+    )
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(
+        default=7,
+        description="Refresh token expiration"
+    )
+    
+    # CORS settings
+    CORS_ORIGINS: list = Field(
+        default=["http://localhost:3000", "http://localhost:8000"],
+        description="Allowed CORS origins"
+    )
+    CORS_ALLOW_CREDENTIALS: bool = Field(default=True)
+    CORS_ALLOW_METHODS: list = Field(default=["*"])
+    CORS_ALLOW_HEADERS: list = Field(default=["*"])
+    
+    # ========================================================================
+    # LOGGING CONFIGURATION
+    # ========================================================================
+    
+    LOG_LEVEL: str = Field(default="INFO", env="LOG_LEVEL")
+    LOG_FORMAT: str = Field(
+        default="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    LOG_TO_FILE: bool = Field(default=True, description="Enable file logging")
+    LOG_FILE_MAX_BYTES: int = Field(
+        default=10 * 1024 * 1024,  # 10 MB
+        description="Max log file size"
+    )
+    LOG_FILE_BACKUP_COUNT: int = Field(
+        default=5,
+        description="Number of log file backups"
+    )
+    
+    # ========================================================================
+    # VALIDATORS
+    # ========================================================================
+    
+    @validator("MODELS_DIR", "DATA_DIR", "LOGS_DIR", pre=False, always=True)
+    def create_directories(cls, v):
+        """Ensure directories exist."""
+        v.mkdir(parents=True, exist_ok=True)
+        return v
+    
+    @validator("CORS_ORIGINS", pre=True)
+    def parse_cors_origins(cls, v):
+        """Parse CORS origins from string or list."""
+        if isinstance(v, str):
+            return [origin.strip() for origin in v.split(",")]
+        return v
+    
+    class Config:
+        """Pydantic configuration."""
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        case_sensitive = True
+
+
+# ============================================================================
+# SINGLETON INSTANCE
+# ============================================================================
+
+settings = Settings()
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def get_model_path(model_name: str, version: Optional[str] = None) -> Path:
+    """Get absolute path to model file."""
+    model_config = settings.MODEL_REGISTRY.get(model_name)
+    if not model_config:
+        raise ValueError(f"Model '{model_name}' not found in registry")
+    
+    model_path = settings.BASE_DIR / model_config["path"]
+    
+    if version:
+        # Use specific version
+        model_path = model_path.parent / f"{model_path.stem}_v{version}{model_path.suffix}"
+    
+    return model_path
+
+
+def get_control_limit(parameter: str, limit_type: str = "max") -> float:
+    """Get control limit for a parameter."""
+    param_config = settings.CONTROL_LIMITS.get(parameter)
+    if not param_config:
+        raise ValueError(f"Parameter '{parameter}' not found in control limits")
+    
+    return param_config.get(limit_type, 0.0)
+
+
+def get_physics_threshold(constraint: str) -> float:
+    """Get physics constraint threshold."""
+    constraint_config = settings.PHYSICS_CONSTRAINTS.get(constraint)
+    if not constraint_config:
+        raise ValueError(f"Constraint '{constraint}' not found in physics constraints")
+    
+    return constraint_config["threshold"]
+
+
+def is_critical_violation(constraint: str, residual: float) -> bool:
+    """Check if residual exceeds critical threshold."""
+    constraint_config = settings.PHYSICS_CONSTRAINTS.get(constraint)
+    if not constraint_config:
+        return False
+    
+    threshold = constraint_config["threshold"]
+    critical_multiplier = constraint_config["severity_multipliers"]["critical"]
+    
+    return residual > (threshold * critical_multiplier)
+
+
+def get_database_url(use_timescale: bool = False) -> str:
+    """Get appropriate database URL."""
+    if use_timescale and settings.TIMESCALE_ENABLED:
+        return settings.TIMESCALE_URL
+    return settings.DATABASE_URL
+
+
+# ============================================================================
+# INITIALIZATION
+# ============================================================================
+
+def initialize_settings():
+    """Initialize settings and create necessary directories."""
+    # Create all required directories
+    settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    settings.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    settings.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Create model subdirectories
+    for model_name in settings.MODEL_REGISTRY.keys():
+        model_dir = settings.MODELS_DIR / model_name
+        model_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"✅ Configuration initialized for {settings.ENV.value} environment")
+    print(f"📁 Base directory: {settings.BASE_DIR}")
+    print(f"📊 Database: {settings.DATABASE_URL.split('@')[1]}")  # Hide credentials
+    if settings.TIMESCALE_ENABLED:
+        print(f"⏰ TimescaleDB: {settings.TIMESCALE_URL.split('@')[1]}")
+    if settings.REDIS_ENABLED:
+        print(f"🔴 Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+    print(f"🧠 Models directory: {settings.MODELS_DIR}")
+
+
+# Auto-initialize on import
+if __name__ != "__main__":
+    initialize_settings()
+
