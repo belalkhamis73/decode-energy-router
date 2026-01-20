@@ -260,7 +260,11 @@ async def get_active_constraints(session_id: str):
     GET /metrics/constraints/{session_id}
     Returns all active and violated physics constraints with severity levels.
     """
-    session = data_manager.get_session(session_id)
+    # Use sync method (now available after patch)
+    if not DATA_MANAGER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DataManager unavailable")
+
+    session = data_manager.get_session(session_id)  # Now works - sync method exists
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -626,3 +630,4 @@ async def clear_metrics_history(session_id: str):
         "session_id": session_id,
         "timestamp_utc": time.time()
 }
+
