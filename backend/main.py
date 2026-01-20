@@ -72,7 +72,7 @@ Architecture Overview:
     ERROR: All training scripts import missing architectures
     - deeponet.py (not provided)
     - hybrid_model.py (referenced but missing)
-
+"""
 import os
 import sys
 import uuid
@@ -87,6 +87,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+import logging
+logger = logging.getLogger("MasterController")
+
+try:
+    from backend.services.data_manager import data_manager
+    logger.info("âœ… DataManager imported successfully")
+except ImportError as e:
+    logger.error(f"âŒ DataManager import failed: {e}")
+    raise
+
+try:
+    from backend.core.pinn_engine import pinn_engine, ModelType
+    logger.info("âœ… PINN Engine imported successfully")
+except ImportError as e:
+    logger.error(f"âŒ PINN Engine import failed: {e}")
+    raise
 # --- PATH SETUP ---
 sys.path.append(os.getcwd())
 
@@ -724,4 +740,5 @@ if __name__ == "__main__":
         log_level="info",
         access_log=True
                                                      )
+
 
