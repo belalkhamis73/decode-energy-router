@@ -10,7 +10,7 @@ Orchestrates real-time interaction between:
 
 Map Requirement: "The endpoint handler. Called by: main.py."
 """
-
+from backend.app.core.config import settings
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
@@ -570,3 +570,4 @@ async def override_parameter(session_id: str, override: ParameterOverride):
     return {
         "status": "parameter_overridden",
         "path": override.parameter_pat
+
