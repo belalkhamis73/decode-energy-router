@@ -425,7 +425,103 @@ class StreamingDataManager:
             logger.info(f"   > Started live weather stream for {sid}")
         
         return session_state
+
+    """
+LOCATION: backend/services/data_manager.py
+ACTION: ADD these methods to StreamingDataManager class (around line 400, after create_session)
+
+FIXES: Async/Sync mismatch - routes expect sync get_session() but only async exists
+"""
+
+class StreamingDataManager:
+    # ... existing __init__ and other methods ...
     
+    # ========== ADD THESE SYNC WRAPPER METHODS ==========
+    
+    def get_session(self, sid: str) -> Optional[Dict[str, Any]]:
+        """
+        SYNC wrapper for session retrieval.
+        Used by: Routes, metrics endpoints, simulation handlers
+        
+        Returns:
+            Session dict or None if not found
+        """
+        return self._sessions.get(sid)
+    
+    def list_sessions(self) -> List[str]:
+        """
+        SYNC: Get all active session IDs
+        
+        Returns:
+            List of session ID strings
+        """
+        return list(self._sessions.keys())
+    
+    def get_session_count(self) -> int:
+        """
+        SYNC: Count active sessions
+        
+        Returns:
+            Number of active sessions
+        """
+        return len(self._sessions)
+    
+    def update_session_state(self, sid: str, updates: Dict[str, Any]) -> bool:
+        """
+        SYNC: Update session state (for asset states, battery SOC, etc.)
+        
+        Args:
+            sid: Session ID
+            updates: Dict of state updates to apply
+            
+        Returns:
+            True if updated, False if session not found
+        """
+        session = self._sessions.get(sid)
+        if not session:
+            return False
+        
+        # Update asset states
+        if 'asset_states' in updates:
+            session['asset_states'].update(updates['asset_states'])
+        
+        # Update any top-level keys
+        for key, value in updates.items():
+            if key != 'asset_states':
+                session[key] = value
+        
+        return True
+    
+    def remove_session(self, sid: str) -> bool:
+        """
+        SYNC: Remove session and cleanup
+        
+        Args:
+            sid: Session ID to remove
+            
+        Returns:
+            True if removed, False if not found
+        """
+        if sid in self._sessions:
+            self._sessions.pop(sid)
+            logger.info(f"🗑️  Removed session {sid}")
+            return True
+        return False
+    
+    # Keep existing async methods for explicit async contexts
+    async def get_session_async(self, sid: str) -> Optional[Dict[str, Any]]:
+        """
+        ASYNC: Retrieve session (explicit async version)
+        Use when in async context and need to await
+        """
+        return self._sessions.get(sid)
+    
+    async def update_session_async(self, sid: str, updates: Dict[str, Any]) -> bool:
+        """
+        ASYNC: Update session state (explicit async version)
+        """
+        return self.update_session_state(sid, updates)
+        
     async def _stream_live_weather(self, 
                                    sid: str,
                                    location: Tuple[float, float],
@@ -752,4 +848,5 @@ class StreamingDataManager:
 
 # Global instance
 data_manager = StreamingDataManager()
+
 
