@@ -25,29 +25,36 @@ from datetime import datetime
 from collections import defaultdict
 
 # Core imports
+# Core imports with fallback handling
 try:
     from backend.services.data_manager import data_manager
     DATA_MANAGER_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    logger.error(f"DataManager import failed: {e}")
     DATA_MANAGER_AVAILABLE = False
-    logging.warning("âš ï¸ DataManager not available")
+    data_manager = None
 
-# Physics imports
+try:
+    from backend.core.pinn_engine import pinn_engine, ModelType
+    PINN_AVAILABLE = True
+except ImportError as e:
+    logger.error(f"PINN Engine import failed: {e}")
+    PINN_AVAILABLE = False
+    pinn_engine = None
+
+# Physics imports with fallback
 try:
     from physics_core.equations.energy_router import EnergyRouter, SourceState
     from physics_core.equations.grid_estimator import GridEstimator
     PHYSICS_AVAILABLE = True
-except ImportError:
+    energy_router = EnergyRouter()
+    grid_estimator = GridEstimator()
+except ImportError as e:
+    logger.warning(f"Physics modules not available: {e}")
     PHYSICS_AVAILABLE = False
-    logging.warning("âš ï¸ Physics modules not available")
+    energy_router = None
+    grid_estimator = None
 
-# PINN engine
-try:
-    from backend.core.pinn_engine import pinn_engine, ModelType
-    PINN_AVAILABLE = True
-except ImportError:
-    PINN_AVAILABLE = False
-    logging.warning("âš ï¸ PINN engine not available")
 
 router = APIRouter()
 logger = logging.getLogger("WebSocketRoute")
@@ -670,3 +677,4 @@ async def broadcast_message(session_id: str, message: dict):
         "session_id": session_id,
         "client_count": client_count
     }
+
