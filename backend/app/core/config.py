@@ -1,7 +1,6 @@
 
 from pydantic_settings import BaseSettings
 from typing import Dict, Any, Optional
-from backend.app.core.config import settings
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "D.E.C.O.D.E."
