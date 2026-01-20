@@ -751,4 +751,5 @@ class StreamingDataManager:
 
 
 # Global instance
-streaming_data_manager = StreamingDataManager()
+data_manager = StreamingDataManager()
+
