@@ -572,4 +572,66 @@ async def websocket_endpoint(
                     logger.error(f"Handler error for {message_type}: {e}")
                     await manager.send_personal_message(
                         {
+                            "type": "ERROR",
+                            "message": f"Handler failed: {str(e)}"
+                        },
+                        session_id,
+                        client_id
+                    )
+            else:
+                await manager.send_personal_message(
+                    {
+                        "type": "ERROR",
+                        "message": f"Unknown message type: {message_type}"
+                    },
+                    session_id,
+                    client_id
+                )
+                
+    except WebSocketDisconnect:
+        manager.disconnect(session_id, client_id)
+        logger.info(f"Client {client_id} disconnected normally")
+        
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(session_id, client_id)
+
+
+# ============================================================================
+# ADMIN ENDPOINTS
+# ============================================================================
+
+@router.get("/connections/stats")
+async def get_connection_stats():
+    """Get WebSocket connection statistics."""
+    return manager.get_connection_stats()
+
+
+@router.get("/connections/clients/{session_id}")
+async def get_session_clients(session_id: str):
+    """Get connected clients for a session."""
+    clients = manager.get_session_clients(session_id)
+    return {
+        "session_id": session_id,
+        "client_count": len(clients),
+        "clients": [
+            {
+                "client_id": cid,
+                "metadata": manager.client_metadata.get(cid, {})
+            }
+            for cid in clients
+        ]
+    }
+
+
+@router.post("/broadcast/message")
+async def broadcast_message(session_id: str, message: dict):
+    """Manually broadcast message to all clients in session."""
+    await manager.broadcast_to_session(message, session_id)
+    return {
+        "status": "broadcasted",
+        "session_id": session_id,
+        "client_count": len(manager.get_session_clients(session_id))
+}
                      
+
