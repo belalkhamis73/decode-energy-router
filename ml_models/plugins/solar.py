@@ -7,7 +7,6 @@ class SolarModelPlugin(ModelPlugin):
         return "solar"
     
     def build_model(self, input_dim=4, hidden_dim=64, output_dim=1, **kwargs):
-        # NOTE: Ensure deeponet is available in ml_models.architectures
         from ml_models.architectures.deeponet import DeepONet
         return DeepONet(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim)
     
