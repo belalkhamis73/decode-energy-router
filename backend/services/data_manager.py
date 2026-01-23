@@ -1,15 +1,8 @@
-# backend/services/data_manager.py
-""" Streaming Data Manager Service – now with Session Aggregate + Repository """
+""" Streaming Data Manager Service
+Real-time data ingestion, state management, and event streaming for Digital Twin SaaS.
+"""
 import logging
 import asyncio
-import json
-import os
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple, Deque
-from collections import deque
-
 import numpy as np
 import pandas as pd
 import pandapower as pp
@@ -18,136 +11,214 @@ import networkx as nx
 import torch
 import aiohttp
 import redis.asyncio as redis
+from collections import deque
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Tuple
+from dataclasses import dataclass, asdict
+import json
+from scipy.interpolate import interp1d
 
-from .weather_client import WeatherAPIClient
-from .subhourly_interpolator import SubHourlyInterpolator
-from ..core.user_controls import UserControlSurface
-from ..core.fault_scenario import FaultScenario
+#--- Import TimeGAN for Chaos Generation ---
+try:
+    from ml_models.training.timegan_generator import TimeGANGenerator, TimeGANConfig
+    TIMEGAN_AVAILABLE = True
+except ImportError:
+    TIMEGAN_AVAILABLE = False
+    logging.warning("TimeGAN not available - synthetic chaos events disabled")
 
+# Configure Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger("StreamingDataManager")
 
-# ────────────────────────
-# DOMAIN AGGREGATE ROOT
-# ────────────────────────
 
 @dataclass
-class DigitalTwinSession:
-    """Aggregate root for a digital twin simulation session."""
-    session_id: str
-    topology: Dict[str, Any]
-    location: Tuple[float, float]
-    weather_mode: str
-
-    # Mutable state (owned by aggregate)
-    user_controls: Dict[str, Any] = field(default_factory=dict)
-    fault_scenario: Dict[str, Any] = field(default_factory=dict)
-    asset_states: Dict[str, Any] = field(default_factory=dict)
-    model_outputs_history: Deque = field(default_factory=lambda: deque(maxlen=3600))
-    constraint_violations_history: List = field(default_factory=list)
-    weather_history: Deque = field(default_factory=lambda: deque(maxlen=3600))
-
-    # Metadata
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    tick_counter: int = 0
-    simulation_time: float = 0.0
-
-    # Runtime dependencies (transient, not persisted)
-    _weather_stream: Optional["asyncio.Queue"] = None
-
-    def set_weather_stream(self, queue: "asyncio.Queue"):
-        self._weather_stream = queue
-
-    def get_weather_stream(self) -> Optional["asyncio.Queue"]:
-        return self._weather_stream
-
-    def to_persistent_dict(self) -> Dict[str, Any]:
-        """Convert to dict safe for serialization (excludes transient fields)."""
-        d = asdict(self)
-        d.pop("_weather_stream", None)
-        return d
-
-    @classmethod
-    def from_persistent_dict(cls, data: Dict[str, Any]) -> "DigitalTwinSession":
-        """Reconstruct from persisted dict."""
-        # Rehydrate deques
-        if "model_outputs_history" in data:
-            data["model_outputs_history"] = deque(data["model_outputs_history"], maxlen=3600)
-        if "weather_history" in data:
-            data["weather_history"] = deque(data["weather_history"], maxlen=3600)
-        return cls(**data)
+class WeatherSnapshot:
+    timestamp: float
+    ghi: float          # W/m²
+    dni: float          # W/m²
+    dhi: float          # W/m²
+    wind_speed: float   # m/s
+    wind_direction: float  # degrees
+    temperature: float  # °C
+    humidity: float     # %
+    pressure: float     # hPa
+    cloud_cover: float  # 0-1
 
 
-# ────────────────────────
-# PERSISTENCE BOUNDARY
-# ────────────────────────
+@dataclass
+class UserControlSurface:
+    cloud_cover_factor: float = 1.0
+    wind_speed_multiplier: float = 1.0
+    temperature_offset: float = 0.0
+    load_multiplier: float = 1.0
+    battery_cooling_override: float = 1.0
+    min_soc_reserve: float = 0.2
+    max_soc_limit: float = 0.95
+    max_charge_rate_kw: float = 50.0
+    max_discharge_rate_kw: float = 50.0
+    diesel_auto_start_enabled: bool = True
+    diesel_min_runtime_sec: float = 300.0
+    diesel_warmup_sec: float = 30.0
+    diesel_cooldown_sec: float = 60.0
+    v2g_participation_rate: float = 0.8
+    v2g_min_departure_soc: float = 0.8
+    grid_import_limit_kw: float = 100.0
+    grid_export_limit_kw: float = 50.0
 
-class SessionRepository(ABC):
-    @abstractmethod
-    async def save(self, session: DigitalTwinSession) -> None:
-        pass
 
-    @abstractmethod
-    async def load(self, session_id: str) -> Optional[DigitalTwinSession]:
-        pass
+@dataclass
+class FaultScenario:
+    active: bool = False
+    fault_type: Optional[str] = None
+    magnitude: float = 0.0
+    affected_buses: List[int] = None
+    start_time: Optional[float] = None
+    duration_sec: float = 0.0
 
-    @abstractmethod
-    async def delete(self, session_id: str) -> bool:
-        pass
+    def __post_init__(self):
+        if self.affected_buses is None:
+            self.affected_buses = []
 
 
-class FileSessionRepository(SessionRepository):
-    def __init__(self, storage_dir: str = "./session_storage"):
-        self.storage_dir = storage_dir
-        os.makedirs(storage_dir, exist_ok=True)
+class WeatherAPIClient:
+    def __init__(self, api_keys: Dict[str, str]):
+        self.nrel_api_key = api_keys.get('nrel', '')
+        self.openweather_api_key = api_keys.get('openweather', '')
+        self.session: Optional[aiohttp.ClientSession] = None
 
-    async def save(self, session: DigitalTwinSession) -> None:
-        path = os.path.join(self.storage_dir, f"{session.session_id}.json")
-        data = session.to_persistent_dict()
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        return self
 
-    async def load(self, session_id: str) -> Optional[DigitalTwinSession]:
-        path = os.path.join(self.storage_dir, f"{session_id}.json")
-        if not os.path.exists(path):
-            return None
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+
+    async def fetch_nrel_solar(self, lat: float, lon: float) -> Dict[str, float]:
+        if not self.nrel_api_key or not self.session:
+            return self._fallback_solar()
         try:
-            with open(path, "r") as f:
-                data = json.load(f)
-            return DigitalTwinSession.from_persistent_dict(data)
+            url = "https://developer.nrel.gov/api/solar/solar_resource/v1.json"
+            params = {'api_key': self.nrel_api_key, 'lat': lat, 'lon': lon}
+            async with self.session.get(url, params=params, timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    outputs = data.get('outputs', {})
+                    return {
+                        'ghi': outputs.get('avg_ghi', {}).get('annual', 0) / 365 * 1000,
+                        'dni': outputs.get('avg_dni', {}).get('annual', 0) / 365 * 1000,
+                        'dhi': outputs.get('avg_ghi', {}).get('annual', 0) / 365 * 300,
+                    }
         except Exception as e:
-            logger.error(f"Failed to load session {session_id}: {e}")
-            return None
+            logger.warning(f"NREL API error: {e}")
+        return self._fallback_solar()
 
-    async def delete(self, session_id: str) -> bool:
-        path = os.path.join(self.storage_dir, f"{session_id}.json")
-        if os.path.exists(path):
-            os.remove(path)
-            return True
-        return False
+    async def fetch_openweather(self, lat: float, lon: float) -> Dict[str, float]:
+        if not self.openweather_api_key or not self.session:
+            return self._fallback_weather()
+        try:
+            url = "https://api.openweathermap.org/data/2.5/weather"
+            params = {'appid': self.openweather_api_key, 'lat': lat, 'lon': lon, 'units': 'metric'}
+            async with self.session.get(url, params=params, timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {
+                        'temperature': data['main']['temp'],
+                        'humidity': data['main']['humidity'],
+                        'pressure': data['main']['pressure'],
+                        'wind_speed': data['wind']['speed'],
+                        'wind_direction': data['wind'].get('deg', 0),
+                        'cloud_cover': data['clouds']['all'] / 100.0
+                    }
+        except Exception as e:
+            logger.warning(f"OpenWeather API error: {e}")
+        return self._fallback_weather()
+
+    @staticmethod
+    def _fallback_solar() -> Dict[str, float]:
+        hour = datetime.now().hour
+        ghi = max(0, 1000 * np.sin(np.pi * (hour - 6) / 12))
+        return {'ghi': ghi, 'dni': ghi * 0.8, 'dhi': ghi * 0.2}
+
+    @staticmethod
+    def _fallback_weather() -> Dict[str, float]:
+        return {
+            'temperature': 25.0,
+            'humidity': 60.0,
+            'pressure': 1013.0,
+            'wind_speed': 5.0,
+            'wind_direction': 180.0,
+            'cloud_cover': 0.3
+        }
 
 
-# ────────────────────────
-# STREAMING DATA MANAGER
-# ────────────────────────
+class SubHourlyInterpolator:
+    @staticmethod
+    def interpolate_to_1hz(hourly_ np.ndarray, noise_level: float = 0.05) -> np.ndarray:
+        hours = len(hourly_data)
+        t_hourly = np.arange(hours)
+        t_1hz = np.linspace(0, hours - 1, hours * 3600)
+        interpolator = interp1d(t_hourly, hourly_data, kind='cubic', fill_value='extrapolate')
+        smooth_1hz = interpolator(t_1hz)
+        noise = np.random.normal(0, noise_level * np.mean(np.abs(hourly_data)), len(smooth_1hz))
+        return np.clip(smooth_1hz + noise, 0, None)
+
+    @staticmethod
+    def add_cloud_transients(ghi_1hz: np.ndarray, event_rate: float = 0.01) -> np.ndarray:
+        result = ghi_1hz.copy()
+        n_samples = len(ghi_1hz)
+        events = np.random.random(n_samples) < event_rate
+        event_indices = np.where(events)[0]
+        for idx in event_indices:
+            duration = int(np.random.uniform(10, 60))
+            reduction = np.random.uniform(0.3, 0.7)
+            end_idx = min(idx + duration, n_samples)
+            ramp_len = duration // 2
+            if ramp_len == 0:
+                ramp_len = 1
+            ramp_up = np.linspace(1, reduction, ramp_len)
+            ramp_down = np.linspace(reduction, 1, ramp_len)
+            ramp = np.concatenate([ramp_up, ramp_down])
+            actual_duration = end_idx - idx
+            if actual_duration > 0:
+                multiplier = np.interp(np.arange(actual_duration), np.arange(len(ramp)), ramp)
+                result[idx:end_idx] *= multiplier[:actual_duration]
+        return result
+
+    @staticmethod
+    def add_wind_gusts(wind_1hz: np.ndarray, gust_rate: float = 0.005) -> np.ndarray:
+        result = wind_1hz.copy()
+        n_samples = len(wind_1hz)
+        events = np.random.random(n_samples) < gust_rate
+        event_indices = np.where(events)[0]
+        for idx in event_indices:
+            duration = int(np.random.uniform(5, 20))
+            amplification = np.random.uniform(1.3, 2.0)
+            end_idx = min(idx + duration, n_samples)
+            ramp_up = np.linspace(1, amplification, duration // 3 or 1)
+            plateau = np.ones(duration // 3 or 1) * amplification
+            ramp_down = np.linspace(amplification, 1, duration - len(ramp_up) - len(plateau) or 1)
+            ramp = np.concatenate([ramp_up, plateau, ramp_down])
+            actual_duration = end_idx - idx
+            if actual_duration > 0:
+                multiplier = np.interp(np.arange(actual_duration), np.arange(len(ramp)), ramp)
+                result[idx:end_idx] *= multiplier[:actual_duration]
+        return np.clip(result, 0, 50)
+
 
 class StreamingDataManager:
     SUPPORTED_GRIDS = ["ieee14", "ieee30", "ieee118"]
 
-    def __init__(
-        self,
-        redis_url: str = "redis://localhost:6379",
-        api_keys: Optional[Dict[str, str]] = None,
-        repository: Optional[SessionRepository] = None,
-    ):
+    def __init__(self, redis_url: str = "redis://localhost:6379", api_keys: Optional[Dict[str, str]] = None):
+        self._sessions: Dict[str, Dict[str, Any]] = {}
         self.redis_url = redis_url
-        self.api_keys = api_keys or {}
-        self.repository = repository or FileSessionRepository()
         self.redis_client: Optional[redis.Redis] = None
+        self.api_keys = api_keys or {}
         self.weather_client: Optional[WeatherAPIClient] = None
         self.interpolator = SubHourlyInterpolator()
-
-        # In-memory cache of active sessions (NOT the source of truth)
-        self._active_sessions: Dict[str, DigitalTwinSession] = {}
         self._streaming_tasks: Dict[str, asyncio.Task] = {}
 
     async def initialize(self):
@@ -157,7 +228,6 @@ class StreamingDataManager:
         except Exception as e:
             logger.warning(f"Redis unavailable: {e}. Continuing without event streaming.")
             self.redis_client = None
-
         self.weather_client = WeatherAPIClient(self.api_keys)
         await self.weather_client.__aenter__()
 
@@ -174,80 +244,78 @@ class StreamingDataManager:
         sid: str,
         topology_name: str,
         location: Tuple[float, float] = (30.0, 31.0),
-        weather_mode: str = "live",
-    ) -> DigitalTwinSession:
-        logger.info(f"✨ Creating Streaming Session {sid}[{topology_name}]")
-
+        weather_mode: str = "live"
+    ) -> Dict[str, Any]:
+        logger.info(f"✨ Creating Streaming Session {sid} [{topology_name}]")
         topology = self.get_topology(topology_name)
         weather_queue = asyncio.Queue(maxsize=3600)
-
-        session = DigitalTwinSession(
-            session_id=sid,
-            topology=topology,
-            location=location,
-            weather_mode=weather_mode,
-            user_controls=asdict(UserControlSurface()),
-            fault_scenario=asdict(FaultScenario()),
-            asset_states={
-                "battery_soc": 0.5,
-                "battery_temp_c": 25.0,
-                "battery_soh": 1.0,
-                "battery_cycles": 0.0,
-                "diesel_status": "OFF",
-                "diesel_warmup_remaining_sec": 0.0,
-                "diesel_runtime_sec": 0.0,
-                "diesel_fuel_remaining_liters": 1000.0,
-                "grid_connected": True,
-                "total_solar_generation_kwh": 0.0,
-                "total_wind_generation_kwh": 0.0,
-                "total_load_served_kwh": 0.0,
+        session_state = {
+            'topology': topology,
+            'location': location,
+            'weather_mode': weather_mode,
+            'weather_stream': weather_queue,
+            'user_controls': asdict(UserControlSurface()),
+            'fault_scenario': asdict(FaultScenario()),
+            'asset_states': {
+                'battery_soc': 0.5,
+                'battery_temp_c': 25.0,
+                'battery_soh': 1.0,
+                'battery_cycles': 0.0,
+                'diesel_status': 'OFF',
+                'diesel_warmup_remaining_sec': 0.0,
+                'diesel_runtime_sec': 0.0,
+                'diesel_fuel_remaining_liters': 1000.0,
+                'grid_connected': True,
+                'total_solar_generation_kwh': 0.0,
+                'total_wind_generation_kwh': 0.0,
+                'total_load_served_kwh': 0.0,
             },
-        )
-        session.set_weather_stream(weather_queue)
-
-        # Save to persistent store
-        await self.repository.save(session)
-        # Cache in memory
-        self._active_sessions[sid] = session
-
+            'model_outputs_history': deque(maxlen=3600),
+            'constraint_violations_history': [],
+            'weather_history': deque(maxlen=3600),
+            'created_at': datetime.now().isoformat(),
+            'tick_counter': 0,
+            'simulation_time': 0.0,
+        }
+        self._sessions[sid] = session_state
         if weather_mode == "live":
             task = asyncio.create_task(self._stream_live_weather(sid, location, weather_queue))
             self._streaming_tasks[sid] = task
             logger.info(f" > Started live weather stream for {sid}")
+        return session_state
 
-        return session
-
-    # ─── SYNC WRAPPERS FOR ROUTES ───────────────────────
-
-    def get_session(self, sid: str) -> Optional[DigitalTwinSession]:
-        """Sync wrapper for FastAPI routes."""
-        return self._active_sessions.get(sid)
+    def get_session(self, sid: str) -> Optional[Dict[str, Any]]:
+        return self._sessions.get(sid)
 
     def list_sessions(self) -> List[str]:
-        return list(self._active_sessions.keys())
+        return list(self._sessions.keys())
 
     def get_session_count(self) -> int:
-        return len(self._active_sessions)
+        return len(self._sessions)
 
     def update_session_state(self, sid: str, updates: Dict[str, Any]) -> bool:
-        session = self._active_sessions.get(sid)
+        session = self._sessions.get(sid)
         if not session:
             return False
-        # Apply updates
+        if 'asset_states' in updates:
+            session['asset_states'].update(updates['asset_states'])
         for key, value in updates.items():
-            if hasattr(session, key):
-                setattr(session, key, value)
-            elif key in session.asset_states:
-                session.asset_states[key] = value
+            if key != 'asset_states':
+                session[key] = value
         return True
 
     def remove_session(self, sid: str) -> bool:
-        removed = self._active_sessions.pop(sid, None) is not None
-        if removed:
+        if sid in self._sessions:
+            self._sessions.pop(sid)
             logger.info(f"🗑️ Removed session {sid}")
-        return removed
+            return True
+        return False
 
-    # ─── INTERNAL METHODS ────────────────────────────────
+    async def get_session_async(self, sid: str) -> Optional[Dict[str, Any]]:
+        return self.get_session(sid)
+
+    async def update_session_async(self, sid: str, updates: Dict[str, Any]) -> bool:
+        return self.update_session_state(sid, updates)
 
     async def _stream_live_weather(self, sid: str, location: Tuple[float, float], queue: asyncio.Queue):
         lat, lon = location
@@ -255,7 +323,6 @@ class StreamingDataManager:
             while True:
                 solar_data = await self.weather_client.fetch_nrel_solar(lat, lon)
                 weather_data = await self.weather_client.fetch_openweather(lat, lon)
-
                 snapshot = WeatherSnapshot(
                     timestamp=datetime.now().timestamp(),
                     ghi=solar_data['ghi'],
@@ -268,19 +335,13 @@ class StreamingDataManager:
                     pressure=weather_data['pressure'],
                     cloud_cover=weather_data['cloud_cover']
                 )
-
                 try:
                     queue.put_nowait(snapshot)
                 except asyncio.QueueFull:
                     queue.get_nowait()
                     queue.put_nowait(snapshot)
-
                 if self.redis_client:
-                    await self.redis_client.publish(
-                        f"weather:{sid}",
-                        json.dumps(asdict(snapshot))
-                    )
-
+                    await self.redis_client.publish(f"weather:{sid}", json.dumps(asdict(snapshot)))
                 await asyncio.sleep(300)
         except asyncio.CancelledError:
             logger.info(f"Weather stream for {sid} stopped")
@@ -323,19 +384,51 @@ class StreamingDataManager:
             "net": net
         }
 
+    async def get_live_weather_snapshot(self, sid: str) -> Optional[WeatherSnapshot]:
+        session = self.get_session(sid)
+        if not session:
+            return None
+
+        queue = session['weather_stream']
+        if queue.qsize() > 0:
+            items = []
+            while not queue.empty():
+                items.append(queue.get_nowait())
+            for item in items:
+                queue.put_nowait(item)
+            return items[-1]
+
+        return self._generate_synthetic_snapshot()
+
+    def _generate_synthetic_snapshot(self) -> WeatherSnapshot:
+        hour = datetime.now().hour
+        ghi = max(0, 1000 * np.sin(np.pi * (hour - 6) / 12))
+        return WeatherSnapshot(
+            timestamp=datetime.now().timestamp(),
+            ghi=ghi,
+            dni=ghi * 0.8,
+            dhi=ghi * 0.2,
+            wind_speed=5.0 + 3.0 * np.sin(hour / 4),
+            wind_direction=180.0,
+            temperature=25.0 + 5.0 * np.sin(np.pi * (hour - 6) / 12),
+            humidity=60.0,
+            pressure=1013.0,
+            cloud_cover=0.3
+        )
+
     def get_user_control_surface(self, sid: str) -> Optional[UserControlSurface]:
         session = self.get_session(sid)
         if not session:
             return None
-        return UserControlSurface(**session.user_controls)
+        return UserControlSurface(**session['user_controls'])
 
     async def apply_user_override(self, sid: str, parameter: str, value: Any) -> bool:
         session = self.get_session(sid)
         if not session:
             logger.warning(f"Session {sid} not found")
             return False
-        controls = session.user_controls
 
+        controls = session['user_controls']
         if parameter not in controls:
             logger.warning(f"Invalid parameter: {parameter}")
             return False
@@ -361,6 +454,7 @@ class StreamingDataManager:
             'v2g_participation_rate': (0.0, 1.0),
             'v2g_min_departure_soc': (0.5, 1.0),
         }
+
         if parameter in validation_rules:
             min_val, max_val = validation_rules[parameter]
             if not (min_val <= value <= max_val):
@@ -385,6 +479,7 @@ class StreamingDataManager:
         session = self.get_session(sid)
         if not session:
             return False
+
         logger.info(f"⚡ Injecting {event_type} event for session {sid}")
 
         if event_type == "black_swan_weather" and TIMEGAN_AVAILABLE:
@@ -393,6 +488,7 @@ class StreamingDataManager:
                 generator = TimeGANGenerator(config)
                 z = torch.randn(1, 24, 3)
                 synthetic = generator(z).detach().numpy()[0]
+
                 for i in range(24):
                     snapshot = WeatherSnapshot(
                         timestamp=datetime.now().timestamp() + i * 3600,
@@ -406,11 +502,12 @@ class StreamingDataManager:
                         pressure=1013.0,
                         cloud_cover=max(0, min(1, synthetic[i, 0]))
                     )
-                    session.get_weather_stream().put_nowait(snapshot)
+                    session['weather_stream'].put_nowait(snapshot)
                 logger.info(" > Injected 24h synthetic chaos profile")
             except Exception as e:
                 logger.error(f"TimeGAN error: {e}")
                 return False
+
         elif event_type in ["line_fault", "generator_trip", "load_spike"]:
             fault = FaultScenario(
                 active=True,
@@ -420,7 +517,8 @@ class StreamingDataManager:
                 start_time=datetime.now().timestamp(),
                 duration_sec=params.get('duration_sec', 60.0)
             )
-            session.fault_scenario = asdict(fault)
+            session['fault_scenario'] = asdict(fault)
+
             if self.redis_client:
                 event = {
                     'type': 'synthetic_event',
@@ -430,7 +528,6 @@ class StreamingDataManager:
                 }
                 await self.redis_client.publish(f"events:{sid}", json.dumps(event))
             return True
-        return True
 
     def generate_1hz_weather_profile(self, hourly_profile: Dict[str, List[float]], apply_transients: bool = True) -> Dict[str, np.ndarray]:
         result = {}
@@ -445,6 +542,7 @@ class StreamingDataManager:
                         hz_1 = self.interpolator.add_wind_gusts(hz_1)
                 result[key] = hz_1
         return result
+
 
 # Global instance
 data_manager = StreamingDataManager()
